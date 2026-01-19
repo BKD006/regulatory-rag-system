@@ -70,3 +70,37 @@ class Chunk(BaseModel):
     token_count: Optional[int] = None
     metadata: Dict[str, Any] = Field(default_factory=dict)
     created_at: Optional[datetime] = None
+
+# ------------------------------------------------------------------
+# Retriever models
+# ------------------------------------------------------------------
+
+class RetrievedChunk(BaseModel):
+    chunk_id: str
+    document_id: str
+    content: str
+    score: float
+    source: str
+    metadata: Dict[str, Any]
+
+
+class RetrievalState(BaseModel):
+    user_query: str
+    bm25_results: List[RetrievedChunk] = Field(default_factory=list)
+    vector_results: List[RetrievedChunk] = Field(default_factory=list)
+    fused_results: List[RetrievedChunk] = Field(default_factory=list)
+
+# ------------------------------------------------------------------
+# Output models
+# ------------------------------------------------------------------
+
+class Citation(BaseModel):
+    document_id: str
+    chunk_id: str
+    source: str
+
+
+class AnswerOutput(BaseModel):
+    answer: str
+    evidence: List[str]
+    citations: List[Citation]
