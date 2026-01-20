@@ -85,11 +85,13 @@ class RetrievedChunk(BaseModel):
 
 
 class RetrievalState(BaseModel):
+    # input
     user_query: str
+    filters: Dict[str, Any] = Field(default_factory=dict)
+    # retrieval
     bm25_results: List[RetrievedChunk] = Field(default_factory=list)
     vector_results: List[RetrievedChunk] = Field(default_factory=list)
     fused_results: List[RetrievedChunk] = Field(default_factory=list)
-
 # ------------------------------------------------------------------
 # Output models
 # ------------------------------------------------------------------
@@ -104,3 +106,18 @@ class AnswerOutput(BaseModel):
     answer: str
     evidence: List[str]
     citations: List[Citation]
+
+# ------------------------------------------------------------------
+# RAG State model
+# ------------------------------------------------------------------
+class RAGState(BaseModel):
+    # Input
+    user_query: str
+    filters: Dict[str, Any] = Field(default_factory=dict)
+
+    # Retrieval
+    retrieved_chunks: list = Field(default_factory=list)
+
+    # Generation
+    answer: Optional[str] = None
+    citations: list = Field(default_factory=list)
