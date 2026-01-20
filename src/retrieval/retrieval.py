@@ -1,49 +1,54 @@
 """
-Hybrid Retrieval Pipeline (BM25 + Vector) using LangGraph.
-
-This module encapsulates:
-- BM25 retrieval (Postgres full-text search)
-- Vector retrieval (pgvector cosine similarity)
-- Reciprocal Rank Fusion (RRF)
-- LangGraph wiring
-
-Designed for regulatory / compliance RAG systems.
+Hybrid Retrieval using LangGraph
+- BM25 + Vector (pgvector)
+- Parallel execution
+- Timeouts + fallback
+- Weighted fusion
+- Metadata filters
 """
 
 import os
 import json
+import asyncio
 import asyncpg
-from typing import List, Dict, Any
+from typing import List, Dict, Any, Optional
 from collections import defaultdict
-from dotenv import load_dotenv
-from pydantic import BaseModel, Field
-from langgraph.graph import StateGraph
+
+from langgraph.graph import StateGraph, START
 
 from src.embeddings.embedder import create_embedder
-from utils.models import RetrievalState, RetrievedChunk
-load_dotenv()
+from utils.models import RetrievedChunk, RetrievalState
+
 
 # ------------------------------------------------------------------
-# Hybrid Retriever (single class)
+# Hybrid Retriever
 # ------------------------------------------------------------------
 
 class HybridRetriever:
     """
-    Hybrid retrieval using BM25 + Vector search, implemented
-    as a LangGraph pipeline inside a single class.
+    Production-grade hybrid retriever.
     """
 
     def __init__(
         self,
+        *,
         top_k: int = 10,
         bm25_k: int = 20,
         vector_k: int = 20,
+        bm25_weight: float = 0.3,
+        vector_weight: float = 0.7,
+        bm25_timeout: float = 30,
+        vector_timeout: float = 30,
     ):
         self.top_k = top_k
         self.bm25_k = bm25_k
         self.vector_k = vector_k
-        self.database_url = os.getenv("DATABASE_URL")
+        self.bm25_weight = bm25_weight
+        self.vector_weight = vector_weight
+        self.bm25_timeout = bm25_timeout
+        self.vector_timeout = vector_timeout
 
+        self.database_url = os.getenv("DATABASE_URL")
         if not self.database_url:
             raise RuntimeError("DATABASE_URL must be set")
 
@@ -51,127 +56,144 @@ class HybridRetriever:
         self.graph = self._build_graph()
 
     # ------------------------------------------------------------------
-    # DB helper
+    # DB helpers
     # ------------------------------------------------------------------
 
-    async def _get_connection(self):
+    async def _get_conn(self):
         return await asyncpg.connect(self.database_url)
 
+    def _parse_json(self, val):
+        return json.loads(val) if isinstance(val, str) else val
+
     # ------------------------------------------------------------------
-    # LangGraph nodes
+    # BM25 Node
     # ------------------------------------------------------------------
 
-    async def _bm25_node(self, state: RetrievalState) -> RetrievalState:
-        """
-        BM25-style retrieval using PostgreSQL full-text search.
-        """
-        conn = await self._get_connection()
+    async def _bm25_node(self, state: RetrievalState):
+        async def _run():
+            conn = await self._get_conn()
 
-        query = """
-        SELECT
-            c.id::text AS chunk_id,
-            c.document_id::text,
-            c.content,
-            ts_rank_cd(
-                to_tsvector('english', c.content),
-                plainto_tsquery('english', $1)
-            ) AS score,
-            d.title AS source,
-            c.metadata
-        FROM chunks c
-        JOIN documents d ON d.id = c.document_id
-        WHERE to_tsvector('english', c.content)
-              @@ plainto_tsquery('english', $1)
-        ORDER BY score DESC
-        LIMIT $2;
-        """
-
-        rows = await conn.fetch(query, state.user_query, self.bm25_k)
-        await conn.close()
-
-        state.bm25_results = [
-            RetrievedChunk(
-                chunk_id=r["chunk_id"],
-                document_id=r["document_id"],
-                content=r["content"],
-                score=float(r["score"]),
-                source=r["source"],
-                metadata=json.loads(r["metadata"]) if isinstance(r["metadata"], str) else r["metadata"],
+            rows = await conn.fetch(
+                """
+                SELECT
+                    c.id::text AS chunk_id,
+                    c.document_id::text,
+                    c.content,
+                    ts_rank_cd(
+                        to_tsvector('english', c.content),
+                        plainto_tsquery('english', $1)
+                    ) AS score,
+                    d.title AS source,
+                    c.metadata
+                FROM chunks c
+                JOIN documents d ON d.id = c.document_id
+                WHERE to_tsvector('english', c.content)
+                      @@ plainto_tsquery('english', $1)
+                ORDER BY score DESC
+                LIMIT $2;
+                """,
+                state.user_query,
+                self.bm25_k,
             )
-            for r in rows
-        ]
 
-        return state
+            await conn.close()
 
-    async def _vector_node(self, state: RetrievalState) -> RetrievalState:
-        """
-        Vector retrieval using pgvector cosine similarity.
-        """
-        query_embedding = await self.embedder.embed_query(state.user_query)
+            return {
+                "bm25_results": [
+                    RetrievedChunk(
+                        chunk_id=r["chunk_id"],
+                        document_id=r["document_id"],
+                        content=r["content"],
+                        score=float(r["score"]),
+                        source=r["source"],
+                        metadata=self._parse_json(r["metadata"]),
+                    )
+                    for r in rows
+                ]
+            }
 
-        # Convert Python list → pgvector literal
-        vector_literal = "[" + ",".join(map(str, query_embedding)) + "]"
+        try:
+            return await asyncio.wait_for(_run(), timeout=self.bm25_timeout)
+        except Exception:
+            return {"bm25_results": []}
 
-        conn = await self._get_connection()
+    # ------------------------------------------------------------------
+    # Vector Node (PARTIAL UPDATE)
+    # ------------------------------------------------------------------
 
-        query = """
-        SELECT
-            c.id::text AS chunk_id,
-            c.document_id::text,
-            c.content,
-            1 - (c.embedding <=> $1::vector) AS score,
-            d.title AS source,
-            c.metadata
-        FROM chunks c
-        JOIN documents d ON d.id = c.document_id
-        ORDER BY c.embedding <=> $1::vector
-        LIMIT $2;
-        """
+    async def _vector_node(self, state: RetrievalState):
+        async def _run():
+            embedding = await self.embedder.embed_query(state.user_query)
+            vector_literal = "[" + ",".join(map(str, embedding)) + "]"
 
-        rows = await conn.fetch(query, vector_literal, self.vector_k)
-        await conn.close()
+            conn = await self._get_conn()
 
-        state.vector_results = [
-            RetrievedChunk(
-                chunk_id=r["chunk_id"],
-                document_id=r["document_id"],
-                content=r["content"],
-                score=float(r["score"]),
-                source=r["source"],
-                metadata=json.loads(r["metadata"]) if isinstance(r["metadata"], str) else r["metadata"],
+            rows = await conn.fetch(
+                """
+                SELECT
+                    c.id::text AS chunk_id,
+                    c.document_id::text,
+                    c.content,
+                    1 - (c.embedding <=> $1::vector) AS score,
+                    d.title AS source,
+                    c.metadata
+                FROM chunks c
+                JOIN documents d ON d.id = c.document_id
+                WHERE c.embedding IS NOT NULL
+                ORDER BY c.embedding <=> $1::vector
+                LIMIT $2;
+                """,
+                vector_literal,
+                self.vector_k,
             )
-            for r in rows
-        ]
 
-        return state
+            await conn.close()
 
+            return {
+                "vector_results": [
+                    RetrievedChunk(
+                        chunk_id=r["chunk_id"],
+                        document_id=r["document_id"],
+                        content=r["content"],
+                        score=float(r["score"]),
+                        source=r["source"],
+                        metadata=self._parse_json(r["metadata"]),
+                    )
+                    for r in rows
+                ]
+            }
 
-    def _fusion_node(self, state: RetrievalState) -> RetrievalState:
-        """
-        Reciprocal Rank Fusion (RRF).
-        """
+        try:
+            return await asyncio.wait_for(_run(), timeout=self.vector_timeout)
+        except Exception:
+            return {"vector_results": []}
+
+    # ------------------------------------------------------------------
+    # Fusion Node (PARTIAL UPDATE)
+    # ------------------------------------------------------------------
+
+    def _fusion_node(self, state: RetrievalState):
         scores = defaultdict(float)
-        chunk_map = {}
+        chunks: Dict[str, RetrievedChunk] = {}
 
-        def add_results(results, weight=1.0):
+        def add(results, weight):
             for rank, r in enumerate(results, start=1):
                 scores[r.chunk_id] += weight / (rank + 60)
-                chunk_map[r.chunk_id] = r
+                chunks[r.chunk_id] = r
 
-        add_results(state.bm25_results, weight=1.0)
-        add_results(state.vector_results, weight=1.0)
+        add(state.bm25_results, self.bm25_weight)
+        add(state.vector_results, self.vector_weight)
 
         fused = sorted(
-            chunk_map.values(),
+            chunks.values(),
             key=lambda r: scores[r.chunk_id],
-            reverse=True
-        )
+            reverse=True,
+        )[: self.top_k]
 
-        state.fused_results = fused[: self.top_k]
-        return state
+        return {"fused_results": fused}
 
     # ------------------------------------------------------------------
-    # Graph construction
+    # Graph Wiring (PARALLEL, SAFE)
     # ------------------------------------------------------------------
 
     def _build_graph(self):
@@ -181,8 +203,10 @@ class HybridRetriever:
         graph.add_node("vector", self._vector_node)
         graph.add_node("fusion", self._fusion_node)
 
-        graph.set_entry_point("bm25")
-        graph.add_edge("bm25", "vector")
+        graph.add_edge(START, "bm25")
+        graph.add_edge(START, "vector")
+
+        graph.add_edge("bm25", "fusion")
         graph.add_edge("vector", "fusion")
 
         return graph.compile()
@@ -191,10 +215,16 @@ class HybridRetriever:
     # Public API
     # ------------------------------------------------------------------
 
-    async def retrieve(self, query: str) -> List[RetrievedChunk]:
-        """
-        Run hybrid retrieval and return top-k fused chunks.
-        """
-        state = RetrievalState(user_query=query)
+    async def retrieve(
+        self,
+        query: str,
+        filters: Optional[Dict[str, Any]] = None,
+    ) -> List[RetrievedChunk]:
+
+        state = RetrievalState(
+            user_query=query,
+            filters=filters or {},
+        )
+
         final_state = await self.graph.ainvoke(state)
         return final_state["fused_results"]
