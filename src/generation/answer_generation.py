@@ -6,18 +6,20 @@ Answer Generation with Citations for Hybrid RAG.
 - Attaches citations (document + chunk IDs)
 """
 
-from typing import List, Dict, Any
-from pydantic import BaseModel, Field
-from utils.models import AnswerOutput, Citation
+from typing import List
+from dataclasses import dataclass
 from langchain_core.messages import SystemMessage, HumanMessage
 from langchain_groq import ChatGroq  # or any LLM you use
-
+from utils.models import RetrievedChunk
 from src.prompts.prompt_library import (
-    PromptID,
-    PROMPT_REGISTRY,
-    build_user_prompt,
+    ANSWER_SYSTEM_PROMPT,
+    ANSWER_USER_PROMPT_TEMPLATE,
 )
 
+@dataclass
+class AnswerResult:
+    answer: str
+    citations: List[RetrievedChunk]
 # ------------------------------------------------------------------
 # Answer Generator
 # ------------------------------------------------------------------
@@ -37,76 +39,44 @@ class AnswerGenerator:
             temperature=temperature,
         )
 
-        self.system_prompt = PROMPT_REGISTRY[PromptID.RETRIEVAL_SYSTEM]
-
     # ------------------------------------------------------------------
     # Public API
     # ------------------------------------------------------------------
 
     async def generate(
-        self,
-        question: str,
-        retrieved_chunks: List[Any],  # RetrievedChunk objects
-    ) -> AnswerOutput:
-        """
-        Generate answer + citations from retrieved chunks.
-        """
+            self,
+            question: str,
+            retrieved_chunks: List[RetrievedChunk],
+        ) -> AnswerResult:
 
-        if not retrieved_chunks:
-            return AnswerOutput(
-                answer="The provided documents do not contain this information.",
-                evidence=[],
-                citations=[],
-            )
-
-        # -----------------------------
-        # Build context + citation map
-        # -----------------------------
-        context_chunks = []
-        citation_map = []
-
-        for idx, chunk in enumerate(retrieved_chunks, start=1):
-            tagged_chunk = (
-                f"[CHUNK {idx}]\n"
-                f"Source: {chunk.source}\n"
-                f"{chunk.content}"
-            )
-            context_chunks.append(tagged_chunk)
-
-            citation_map.append(
-                Citation(
-                    document_id=chunk.document_id,
-                    chunk_id=chunk.chunk_id,
-                    source=chunk.source,
+            if not retrieved_chunks:
+                return AnswerResult(
+                    answer="I could not find this information in the provided documents.",
+                    citations=[],
                 )
+
+            # Build numbered source blocks
+            source_blocks = []
+            for idx, chunk in enumerate(retrieved_chunks, start=1):
+                source_blocks.append(
+                    f"[{idx}] Source: {chunk.source}\n{chunk.content}"
+                )
+
+            sources_text = "\n\n".join(source_blocks)
+
+            user_prompt = ANSWER_USER_PROMPT_TEMPLATE.format(
+                question=question,
+                sources=sources_text,
             )
 
-        user_prompt = build_user_prompt(
-            question=question,
-            context_chunks=context_chunks,
-        )
+            messages = [
+                SystemMessage(content=ANSWER_SYSTEM_PROMPT),
+                HumanMessage(content=user_prompt),
+            ]
 
-        # -----------------------------
-        # LLM call
-        # -----------------------------
-        messages = [
-            SystemMessage(content=self.system_prompt),
-            HumanMessage(content=user_prompt),
-        ]
+            response = await self.llm.ainvoke(messages)
 
-        response = await self.llm.ainvoke(messages)
-        answer_text = response.content.strip()
-
-        # -----------------------------
-        # Evidence extraction (simple)
-        # -----------------------------
-        evidence = [
-            f"{c.source} (chunk {i+1})"
-            for i, c in enumerate(citation_map)
-        ]
-
-        return AnswerOutput(
-            answer=answer_text,
-            evidence=evidence,
-            citations=citation_map,
-        )
+            return AnswerResult(
+                answer=response.content.strip(),
+                citations=retrieved_chunks,
+            )
