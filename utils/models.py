@@ -81,7 +81,7 @@ class RetrievedChunk(BaseModel):
     content: str
     score: float
     source: str
-    metadata: Dict[str, Any]
+    metadata: Dict[str, Any] = Field(default_factory=dict)
 
 
 class RetrievalState(BaseModel):
@@ -97,9 +97,13 @@ class RetrievalState(BaseModel):
 # ------------------------------------------------------------------
 
 class Citation(BaseModel):
+    """
+    Clean citation returned to the user.
+    """
+    id: int
+    source: str
     document_id: str
     chunk_id: str
-    source: str
 
 
 class AnswerOutput(BaseModel):
@@ -111,13 +115,18 @@ class AnswerOutput(BaseModel):
 # RAG State model
 # ------------------------------------------------------------------
 class RAGState(BaseModel):
+    """
+    State object used across the LangGraph RAG pipeline.
+    """
+
     # Input
     user_query: str
     filters: Dict[str, Any] = Field(default_factory=dict)
 
     # Retrieval
-    retrieved_chunks: list = Field(default_factory=list)
+    retrieved_chunks: List[RetrievedChunk] = Field(default_factory=list)
+    reranked_chunks: List[RetrievedChunk] = Field(default_factory=list)
 
-    # Generation
+    # Output
     answer: Optional[str] = None
-    citations: list = Field(default_factory=list)
+    citations: List[RetrievedChunk] = Field(default_factory=list)
