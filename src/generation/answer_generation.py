@@ -15,7 +15,7 @@ from src.prompts.prompt_library import (
     ANSWER_SYSTEM_PROMPT,
     ANSWER_USER_PROMPT_TEMPLATE,
 )
-
+from utils.observability import langfuse_callback
 @dataclass
 class AnswerResult:
     answer: str
@@ -37,6 +37,7 @@ class AnswerGenerator:
         self.llm = ChatGroq(
             model=model_name,
             temperature=temperature,
+            callbacks=[langfuse_callback],
         )
 
     # ------------------------------------------------------------------
