@@ -136,6 +136,8 @@ class DocumentIngestionPipeline:
 
         content, docling_doc = self._read_document(file_path)
         title = self._extract_title(content, file_path)
+        #force title into retrievable text
+        content = f"# {title}\n\n{content}"
         source = os.path.relpath(file_path, self.documents_folder)
         metadata = self._extract_document_metadata(content, file_path)
 
@@ -230,10 +232,15 @@ class DocumentIngestionPipeline:
 
         if ext == ".pdf":
             result = self.converter.convert(file_path)
-            return result.document.export_to_markdown(), result.document
+
+            # Export markdown WITH structure
+            content = result.document.export_to_markdown()
+
+            return content, result.document
 
         with open(file_path, "r", encoding="utf-8") as f:
             return f.read(), None
+
 
     def _extract_title(self, content: str, file_path: str) -> str:
         for line in content.splitlines()[:10]:
@@ -244,11 +251,13 @@ class DocumentIngestionPipeline:
     def _extract_document_metadata(self, content: str, file_path: str) -> Dict[str, Any]:
         return {
             "file_path": file_path,
+            "file_name": Path(file_path).name,
             "file_size": len(content),
             "line_count": len(content.splitlines()),
             "word_count": len(content.split()),
             "ingested_at": datetime.now().isoformat(),
         }
+
 
     async def _save_to_postgres(
         self,
