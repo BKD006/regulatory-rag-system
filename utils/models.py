@@ -130,3 +130,8 @@ class RAGState(BaseModel):
     # Output
     answer: Optional[str] = None
     citations: List[RetrievedChunk] = Field(default_factory=list)
+
+class QueryRequest(BaseModel):
+    question: str
+    thread_id: Optional[str] = None
+    filters: Optional[Dict[str, Any]] = None
