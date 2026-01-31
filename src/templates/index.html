@@ -1,0 +1,72 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <title>Regulatory RAG System</title>
+    <link rel="stylesheet" href="/static/style.css">
+</head>
+<body>
+
+<h1>📘 Regulatory RAG System</h1>
+
+<div class="container">
+
+    <!-- ================= INGEST UI ================= -->
+    <div class="box">
+        <h2>📂 Ingest Document</h2>
+
+        <form action="/ingest-ui" method="post" enctype="multipart/form-data">
+            <input type="file" name="file" required>
+            <br><br>
+            <button type="submit">Ingest</button>
+        </form>
+
+        {% if ingest_message %}
+        <p class="success">{{ ingest_message }}</p>
+        {% endif %}
+    </div>
+
+    <!-- ================= QUERY UI ================= -->
+    <div class="box">
+        <h2>💬 Ask a Question</h2>
+
+        <form action="/query-ui" method="post">
+            <label>Question</label><br>
+            <textarea name="question" rows="4" required>{{ question or "" }}</textarea>
+
+            <br><br>
+
+            <label>Thread ID (optional)</label><br>
+            <input type="text" name="thread_id" value="{{ thread_id or "" }}">
+
+            <br><br>
+
+            <label>Filters (JSON, optional)</label><br>
+            <input type="text" name="filters" placeholder='{"title": "R0r5e"}'>
+
+            <br><br>
+
+            <button type="submit">Ask</button>
+        </form>
+
+        {% if answer %}
+        <hr>
+        <h3>Answer</h3>
+        <p>{{ answer }}</p>
+
+        <h4>Citations</h4>
+        <ul>
+            {% for c in citations %}
+            <li>
+                📄 {{ c.source }} <br>
+                Document ID: {{ c.document_id }} <br>
+                Chunk ID: {{ c.chunk_id }}
+            </li>
+            {% endfor %}
+        </ul>
+        {% endif %}
+    </div>
+
+</div>
+
+</body>
+</html>
