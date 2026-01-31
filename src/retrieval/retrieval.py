@@ -4,7 +4,7 @@ Hybrid Retrieval using LangGraph
 - Parallel execution
 - Timeouts + fallback
 - Weighted fusion
-- Metadata filters
+- STRICT metadata filters (NO leakage)
 """
 
 import os
@@ -20,13 +20,9 @@ from src.embeddings.embedder import create_embedder
 from utils.models import RetrievedChunk, RetrievalState
 
 
-# ------------------------------------------------------------------
-# Hybrid Retriever
-# ------------------------------------------------------------------
-
 class HybridRetriever:
     """
-    Production-grade hybrid retriever.
+    Production-grade hybrid retriever with strict filtering.
     """
 
     def __init__(
@@ -55,9 +51,9 @@ class HybridRetriever:
         self.embedder = create_embedder()
         self.graph = self._build_graph()
 
-    # ------------------------------------------------------------------
+    # -------------------------------------------------
     # DB helpers
-    # ------------------------------------------------------------------
+    # -------------------------------------------------
 
     async def _get_conn(self):
         return await asyncpg.connect(self.database_url)
@@ -65,13 +61,16 @@ class HybridRetriever:
     def _parse_json(self, val):
         return json.loads(val) if isinstance(val, str) else val
 
-    # ------------------------------------------------------------------
-    # BM25 Node
-    # ------------------------------------------------------------------
+    # -------------------------------------------------
+    # BM25 Node (FILTERED)
+    # -------------------------------------------------
 
     async def _bm25_node(self, state: RetrievalState):
         async def _run():
             conn = await self._get_conn()
+
+            filters = state.filters or {}
+            title_filter = filters.get("title")
 
             rows = await conn.fetch(
                 """
@@ -89,10 +88,12 @@ class HybridRetriever:
                 JOIN documents d ON d.id = c.document_id
                 WHERE to_tsvector('english', c.content)
                       @@ plainto_tsquery('english', $1)
+                  AND ($2::text IS NULL OR d.title = $2)
                 ORDER BY score DESC
-                LIMIT $2;
+                LIMIT $3;
                 """,
                 state.user_query,
+                title_filter,
                 self.bm25_k,
             )
 
@@ -117,14 +118,17 @@ class HybridRetriever:
         except Exception:
             return {"bm25_results": []}
 
-    # ------------------------------------------------------------------
-    # Vector Node (PARTIAL UPDATE)
-    # ------------------------------------------------------------------
+    # -------------------------------------------------
+    # Vector Node (FILTERED)
+    # -------------------------------------------------
 
     async def _vector_node(self, state: RetrievalState):
         async def _run():
             embedding = await self.embedder.embed_query(state.user_query)
             vector_literal = "[" + ",".join(map(str, embedding)) + "]"
+
+            filters = state.filters or {}
+            title_filter = filters.get("title")
 
             conn = await self._get_conn()
 
@@ -140,10 +144,12 @@ class HybridRetriever:
                 FROM chunks c
                 JOIN documents d ON d.id = c.document_id
                 WHERE c.embedding IS NOT NULL
+                  AND ($2::text IS NULL OR d.title = $2)
                 ORDER BY c.embedding <=> $1::vector
-                LIMIT $2;
+                LIMIT $3;
                 """,
                 vector_literal,
+                title_filter,
                 self.vector_k,
             )
 
@@ -168,9 +174,9 @@ class HybridRetriever:
         except Exception:
             return {"vector_results": []}
 
-    # ------------------------------------------------------------------
-    # Fusion Node (PARTIAL UPDATE)
-    # ------------------------------------------------------------------
+    # -------------------------------------------------
+    # Fusion Node (STRICT)
+    # -------------------------------------------------
 
     def _fusion_node(self, state: RetrievalState):
         scores = defaultdict(float)
@@ -192,9 +198,9 @@ class HybridRetriever:
 
         return {"fused_results": fused}
 
-    # ------------------------------------------------------------------
-    # Graph Wiring (PARALLEL, SAFE)
-    # ------------------------------------------------------------------
+    # -------------------------------------------------
+    # Graph Wiring
+    # -------------------------------------------------
 
     def _build_graph(self):
         graph = StateGraph(RetrievalState)
@@ -205,15 +211,14 @@ class HybridRetriever:
 
         graph.add_edge(START, "bm25")
         graph.add_edge(START, "vector")
-
         graph.add_edge("bm25", "fusion")
         graph.add_edge("vector", "fusion")
 
         return graph.compile()
 
-    # ------------------------------------------------------------------
+    # -------------------------------------------------
     # Public API
-    # ------------------------------------------------------------------
+    # -------------------------------------------------
 
     async def retrieve(
         self,
