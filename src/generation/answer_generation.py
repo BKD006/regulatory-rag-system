@@ -1,32 +1,44 @@
 """
 Answer Generation with Citations for Hybrid RAG.
 
-- Consumes retrieved chunks
+- Consumes GUARDED chunks only
 - Produces a grounded answer
-- Attaches citations (document + chunk IDs)
+- Enforces single-document usage
+- Attaches citations safely
 """
 
 from typing import List
 from dataclasses import dataclass
+
 from langchain_core.messages import SystemMessage, HumanMessage
-from langchain_groq import ChatGroq  # or any LLM you use
+from langchain_groq import ChatGroq
+
 from utils.models import RetrievedChunk
 from src.prompts.prompt_library import (
     ANSWER_SYSTEM_PROMPT,
     ANSWER_USER_PROMPT_TEMPLATE,
 )
 from utils.observability import langfuse_callback
+
+
+# ------------------------------------------------------------------
+# Models
+# ------------------------------------------------------------------
+
 @dataclass
 class AnswerResult:
     answer: str
     citations: List[RetrievedChunk]
+
+
 # ------------------------------------------------------------------
 # Answer Generator
 # ------------------------------------------------------------------
 
 class AnswerGenerator:
     """
-    Generates a grounded answer with citations from retrieved chunks.
+    Generates a grounded answer from a SINGLE document
+    using pre-validated chunks.
     """
 
     def __init__(
@@ -45,39 +57,89 @@ class AnswerGenerator:
     # ------------------------------------------------------------------
 
     async def generate(
-            self,
-            question: str,
-            retrieved_chunks: List[RetrievedChunk],
-        ) -> AnswerResult:
+        self,
+        question: str,
+        retrieved_chunks: List[RetrievedChunk],
+    ) -> AnswerResult:
+        """
+        retrieved_chunks MUST already be guardrail-validated.
+        """
 
-            if not retrieved_chunks:
-                return AnswerResult(
-                    answer="I could not find this information in the provided documents.",
-                    citations=[],
-                )
-
-            # Build numbered source blocks
-            source_blocks = []
-            for idx, chunk in enumerate(retrieved_chunks, start=1):
-                source_blocks.append(
-                    f"[{idx}] Source: {chunk.source}\n{chunk.content}"
-                )
-
-            sources_text = "\n\n".join(source_blocks)
-
-            user_prompt = ANSWER_USER_PROMPT_TEMPLATE.format(
-                question=question,
-                sources=sources_text,
-            )
-
-            messages = [
-                SystemMessage(content=ANSWER_SYSTEM_PROMPT),
-                HumanMessage(content=user_prompt),
-            ]
-
-            response = await self.llm.ainvoke(messages)
-
+        if not retrieved_chunks:
             return AnswerResult(
-                answer=response.content.strip(),
-                citations=retrieved_chunks,
+                answer=(
+                    "I could not find this information "
+                    "in the provided document."
+                ),
+                citations=[],
             )
+
+        # --------------------------------------------------
+        # HARD safety: enforce single document at runtime
+        # --------------------------------------------------
+        sources = {c.source for c in retrieved_chunks}
+        if len(sources) != 1:
+            return AnswerResult(
+                answer=(
+                    "This question cannot be answered safely "
+                    "because multiple documents were detected."
+                ),
+                citations=[],
+            )
+
+        document_title = next(iter(sources))
+
+        # --------------------------------------------------
+        # Build strictly controlled source blocks
+        # --------------------------------------------------
+        source_blocks = []
+        for idx, chunk in enumerate(retrieved_chunks, start=1):
+            source_blocks.append(
+                f"[{idx}] ({document_title})\n{chunk.content}"
+            )
+
+        sources_text = "\n\n".join(source_blocks)
+
+        # --------------------------------------------------
+        # User prompt (STRICT)
+        # --------------------------------------------------
+        user_prompt = ANSWER_USER_PROMPT_TEMPLATE.format(
+            question=question,
+            sources=sources_text,
+        )
+
+        # --------------------------------------------------
+        # System prompt (HARD instructions)
+        # --------------------------------------------------
+        system_prompt = (
+            ANSWER_SYSTEM_PROMPT
+            + "\n\n"
+            + f"""
+                IMPORTANT RULES (NON-NEGOTIABLE):
+                - You MUST answer using ONLY the document titled "{document_title}"
+                - Do NOT reference any other document
+                - If the answer is not present, say so clearly
+                - Do NOT guess or infer beyond the provided text
+                """
+        )
+
+        messages = [
+            SystemMessage(content=system_prompt),
+            HumanMessage(content=user_prompt),
+        ]
+
+        # --------------------------------------------------
+        # LLM call
+        # --------------------------------------------------
+        response = await self.llm.ainvoke(messages)
+
+        answer_text = response.content.strip()
+
+        # --------------------------------------------------
+        # Return ONLY the chunks we actually passed in
+        # (no leakage possible)
+        # --------------------------------------------------
+        return AnswerResult(
+            answer=answer_text,
+            citations=retrieved_chunks,
+        )

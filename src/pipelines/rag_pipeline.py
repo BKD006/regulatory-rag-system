@@ -1,6 +1,6 @@
 """
 End-to-end RAG LangGraph:
-Retrieval → Reranking → Answer Generation with Citations
+Retrieval → Reranking → Guardrails → Answer Generation
 """
 
 from typing import Dict, Any, Optional, List
@@ -10,14 +10,14 @@ from langgraph.checkpoint.memory import MemorySaver
 from src.retrieval.retrieval import HybridRetriever
 from src.generation.answer_generation import AnswerGenerator
 from src.reranking.reranker import CrossEncoderReranker
+from src.guardrails.guardrails import AnswerGuardrails, GuardrailViolation
 from utils.models import RAGState, RetrievedChunk
 from utils.helper_functions import format_citations
 
 
 class RAGPipeline:
     """
-    End-to-end RAG pipeline using LangGraph + checkpointed memory.
-    Designed for regulatory / compliance-grade QA.
+    End-to-end RAG pipeline with HARD guardrails.
     """
 
     def __init__(self):
@@ -26,50 +26,58 @@ class RAGPipeline:
         self.reranker = CrossEncoderReranker(top_k=6)
         self.answer_generator = AnswerGenerator()
         self.graph = self._build_graph()
+        self.guardrails = AnswerGuardrails()
 
     # -------------------------------------------------
     # LangGraph Nodes
     # -------------------------------------------------
 
     async def retrieval_node(self, state: RAGState) -> Dict[str, Any]:
-        """
-        Strict retrieval (filters enforced at DB level).
-        """
-        chunks: List[RetrievedChunk] = await self.retriever.retrieve(
+        chunks = await self.retriever.retrieve(
             query=state.user_query,
             filters=state.filters,
         )
         return {"retrieved_chunks": chunks}
 
     async def rerank_node(self, state: RAGState) -> Dict[str, Any]:
-        """
-        Rerank retrieved chunks.
-        Falls back safely if reranker returns nothing.
-        """
-        if not state.retrieved_chunks:
-            return {"reranked_chunks": []}
-
         reranked = self.reranker.rerank(
             query=state.user_query,
             chunks=state.retrieved_chunks,
         )
+        return {"reranked_chunks": reranked}
 
-        return {
-            "reranked_chunks": reranked or state.retrieved_chunks
-        }
+    async def guardrail_node(self, state: RAGState) -> Dict[str, Any]:
+        """
+        HARD enforcement BEFORE LLM:
+        - Single document only
+        - Minimum evidence
+        """
+
+        chunks: List[RetrievedChunk] = (
+            state.reranked_chunks or state.retrieved_chunks
+        )
+
+        try:
+            guarded_chunks = self.guardrails.apply_retrieval_guardrails(
+                chunks=chunks,
+                filters=state.filters,
+                min_chunks=1,
+            )
+        except GuardrailViolation as e:
+            # HARD STOP — safe refusal
+            return {
+                "answer": str(e),
+                "citations": [],
+            }
+
+        return {"guarded_chunks": guarded_chunks}
 
     async def answer_node(self, state: RAGState) -> Dict[str, Any]:
-        """
-        Generate answer ONLY if evidence exists.
-        """
-        chunks = state.reranked_chunks or state.retrieved_chunks
+        chunks = state.guarded_chunks or []
 
         if not chunks:
             return {
-                "answer": (
-                    "No relevant information was found in the selected "
-                    "document(s) to answer this question."
-                ),
+                "answer": "The question cannot be answered safely from the selected document.",
                 "citations": [],
             }
 
@@ -78,13 +86,20 @@ class RAGPipeline:
             retrieved_chunks=chunks,
         )
 
+        # 🔒 HARD citation filtering
+        citations = self.guardrails.filter_citations(
+            result.citations,
+            allowed_chunks=chunks,
+        )
+
         return {
             "answer": result.answer,
-            "citations": result.citations,
+            "citations": citations,
         }
 
+
     # -------------------------------------------------
-    # Graph Wiring
+    # Graph wiring
     # -------------------------------------------------
 
     def _build_graph(self):
@@ -92,11 +107,13 @@ class RAGPipeline:
 
         graph.add_node("retrieve", self.retrieval_node)
         graph.add_node("rerank", self.rerank_node)
+        graph.add_node("guardrails", self.guardrail_node)
         graph.add_node("answer", self.answer_node)
 
         graph.add_edge(START, "retrieve")
         graph.add_edge("retrieve", "rerank")
-        graph.add_edge("rerank", "answer")
+        graph.add_edge("rerank", "guardrails")
+        graph.add_edge("guardrails", "answer")
 
         return graph.compile(checkpointer=self.checkpointer)
 
@@ -104,14 +121,18 @@ class RAGPipeline:
     # Public API
     # -------------------------------------------------
 
-    async def run(self,query: str,*,thread_id: str,filters: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
-
-        filters = filters or {}
+    async def run(
+        self,
+        query: str,
+        *,
+        thread_id: str,
+        filters: Optional[Dict[str, Any]] = None,
+    ) -> Dict[str, Any]:
 
         final_state = await self.graph.ainvoke(
             RAGState(
                 user_query=query,
-                filters=filters,
+                filters=filters or {},
             ),
             config={
                 "configurable": {
@@ -120,34 +141,9 @@ class RAGPipeline:
             },
         )
 
-        answer = final_state.get("answer")
-        raw_citations = final_state.get("citations", [])
-
-        # -------------------------------------------------
-        # 🔒 HARD CITATION FILTER (FAIL-CLOSED)
-        # -------------------------------------------------
-
-        if "title" in filters:
-            allowed_title = filters["title"]
-
-            filtered_citations = [
-                c for c in raw_citations
-                if c.source == allowed_title
-            ]
-
-            # If LLM tried to use other documents → drop them
-            if not filtered_citations:
-                return {
-                    "answer": (
-                        "The selected document does not contain sufficient "
-                        "information to answer this question."
-                    ),
-                    "citations": [],
-                }
-
-            raw_citations = filtered_citations
-
         return {
-            "answer": answer,
-            "citations": format_citations(raw_citations),
+            "answer": final_state.get("answer"),
+            "citations": format_citations(
+                final_state.get("citations", [])
+            ),
         }
