@@ -18,6 +18,7 @@ from src.prompts.prompt_library import (
     ANSWER_SYSTEM_PROMPT,
     ANSWER_USER_PROMPT_TEMPLATE,
 )
+from utils.model_loader import ModelLoader
 from utils.observability import langfuse_callback
 
 
@@ -41,16 +42,8 @@ class AnswerGenerator:
     using pre-validated chunks.
     """
 
-    def __init__(
-        self,
-        model_name: str = "llama-3.1-8b-instant",
-        temperature: float = 0.0,
-    ):
-        self.llm = ChatGroq(
-            model=model_name,
-            temperature=temperature,
-            callbacks=[langfuse_callback],
-        )
+    def __init__(self):
+        self.llm= ModelLoader().load_llm()
 
     # ------------------------------------------------------------------
     # Public API
@@ -137,7 +130,6 @@ class AnswerGenerator:
 
         # --------------------------------------------------
         # Return ONLY the chunks we actually passed in
-        # (no leakage possible)
         # --------------------------------------------------
         return AnswerResult(
             answer=answer_text,
