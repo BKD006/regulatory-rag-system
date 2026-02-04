@@ -1,0 +1,13 @@
+embedding_model:
+  provider: "aws"
+  model_name: "amazon.titan-embed-text-v2:0"
+
+retriver:
+  top_k: 10
+
+llm:
+  groq:
+    provider: "groq"
+    model_name: "llama-3.1-8b-instant"
+    temperature: 0
+    max_output_token: 2048
