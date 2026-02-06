@@ -24,49 +24,12 @@ from dotenv import load_dotenv
 from transformers import AutoTokenizer
 from docling.chunking import HybridChunker
 from docling_core.types.doc import DoclingDocument
+from utils.models import DocumentChunk, ChunkingConfig
 
 # Load environment variables
 load_dotenv()
 
 logger = logging.getLogger(__name__)
-
-
-@dataclass
-class ChunkingConfig:
-    """Configuration for chunking."""
-    chunk_size: int = 1000  # Target characters per chunk
-    chunk_overlap: int = 200  # Character overlap between chunks
-    max_chunk_size: int = 2000  # Maximum chunk size
-    min_chunk_size: int = 100  # Minimum chunk size
-    use_semantic_splitting: bool = True  # Use HybridChunker (recommended)
-    preserve_structure: bool = True  # Preserve document structure
-    max_tokens: int = 512  # Maximum tokens for embedding models
-
-    def __post_init__(self):
-        """Validate configuration."""
-        if self.chunk_overlap >= self.chunk_size:
-            raise ValueError("Chunk overlap must be less than chunk size")
-        if self.min_chunk_size <= 0:
-            raise ValueError("Minimum chunk size must be positive")
-
-
-@dataclass
-class DocumentChunk:
-    """Represents a document chunk with optional embedding."""
-    content: str
-    index: int
-    start_char: int
-    end_char: int
-    metadata: Dict[str, Any]
-    token_count: Optional[int] = None
-    embedding: Optional[List[float]] = None  # For embedder compatibility
-
-    def __post_init__(self):
-        """Calculate token count if not provided."""
-        if self.token_count is None:
-            # Rough estimation: ~4 characters per token
-            self.token_count = len(self.content) // 4
-
 
 class DoclingHybridChunker:
     """
