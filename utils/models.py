@@ -128,7 +128,7 @@ class RAGState(BaseModel):
     reranked_chunks: List[RetrievedChunk] = Field(default_factory=list)
 
     #Guardrails stage
-    guarded_chunks: Optional[List[RetrievedChunk]] = None
+    guarded_chunks: Optional[List[RetrievedChunk]] = Field(default_factory=list)
     
     # Output
     answer: Optional[str] = None
