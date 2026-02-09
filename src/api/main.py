@@ -30,7 +30,6 @@ app = FastAPI(
 
 DATA_DIR = "data"
 
-# Mount static files and templates so the frontend can be served
 app.mount("/static", StaticFiles(directory="src/static"), name="static")
 templates = Jinja2Templates(directory="src/templates")
 
