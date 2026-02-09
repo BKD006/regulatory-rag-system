@@ -1,15 +1,22 @@
-from fastapi import FastAPI, UploadFile, File, HTTPException
+from fastapi import FastAPI, UploadFile, File, HTTPException, Request
+from fastapi.staticfiles import StaticFiles
+from fastapi.templating import Jinja2Templates
 import os
+import shutil
 import shutil
 import uuid
 
 from src.indexing.ingest import DocumentIngestionPipeline
 from src.pipelines.rag_pipeline import RAGPipeline
 from utils.models import IngestionConfig, QueryRequest
-from utils.db_utils_async import (
+import json
+from fastapi import status
+from utils.db_utils import (
     list_documents,
     list_document_titles,
     delete_document_by_title,
+    init_db_pool,
+    close_db_pool,
 )
 
 # -------------------------------------------------
@@ -22,6 +29,10 @@ app = FastAPI(
 )
 
 DATA_DIR = "data"
+
+# Mount static files and templates so the frontend can be served
+app.mount("/static", StaticFiles(directory="src/static"), name="static")
+templates = Jinja2Templates(directory="src/templates")
 
 # -------------------------------------------------
 # Pipelines (singletons)
@@ -41,6 +52,34 @@ rag_pipeline = RAGPipeline()
 @app.get("/health")
 async def health():
     return {"status": "ok"}
+
+
+@app.get("/")
+async def index(request: Request):
+    """Serve the HTMX single-page frontend."""
+    return templates.TemplateResponse("index.html", {"request": request})
+
+
+@app.on_event("startup")
+async def on_startup():
+    # initialize DB connection pool used by the async utils
+    await init_db_pool()
+
+
+@app.on_event("shutdown")
+async def on_shutdown():
+    # cleanly close DB pool
+    try:
+        await close_db_pool()
+    except Exception:
+        pass
+    # remove temporary data folder created for ingested files
+    try:
+        # only remove the DATA_DIR inside the project to avoid accidental deletions
+        if os.path.isdir(DATA_DIR):
+            shutil.rmtree(DATA_DIR)
+    except Exception:
+        pass
 
 
 # -------------------------------------------------
@@ -70,18 +109,49 @@ async def ingest_document(file: UploadFile = File(...)):
 # -------------------------------------------------
 
 @app.post("/query")
-async def query_rag(request: QueryRequest):
-    thread_id = request.thread_id or f"session-{uuid.uuid4()}"
+async def query_rag(request: Request):
+    """Accept JSON or form POSTs, validate against QueryRequest, and run the RAG pipeline.
+
+    This is more forgiving than FastAPI's automatic body parsing and will return
+    clearer validation errors when the payload shape is incorrect.
+    """
+    payload = {}
+    # try JSON body first
+    try:
+        payload = await request.json()
+    except Exception:
+        # try form data
+        try:
+            form = await request.form()
+            payload = dict(form)
+        except Exception:
+            payload = {}
+
+    # normalize filters if passed as a JSON string
+    if isinstance(payload.get("filters"), str):
+        try:
+            payload["filters"] = json.loads(payload["filters"]) if payload.get("filters") else None
+        except Exception:
+            # leave as string; validation will catch if invalid
+            pass
+
+    try:
+        qreq = QueryRequest.model_validate(payload)
+    except Exception as e:
+        # return structured 422 with validation detail
+        raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail=str(e))
+
+    thread_id = qreq.thread_id or f"session-{uuid.uuid4()}"
 
     result = await rag_pipeline.run(
-        query=request.question,
+        query=qreq.question,
         thread_id=thread_id,
-        filters=request.filters,
+        filters=qreq.filters,
     )
 
     return {
         "thread_id": thread_id,
-        "answer": result["answer"],
+        "answer": result.get("answer"),
         "citations": result.get("citations", []),
     }
 
