@@ -31,6 +31,7 @@ from utils.db_utils import (
     get_document_by_source,
     delete_document_and_chunks,
 )
+import asyncpg
 from utils import db_utils
 
 from utils.models import IngestionConfig, IngestionResult
@@ -271,40 +272,54 @@ class DocumentIngestionPipeline:
 
         async with db_utils.db_pool.acquire() as conn:
             async with conn.transaction():
-                doc = await conn.fetchrow(
-                    """
-                    INSERT INTO documents (title, source, file_hash, content, metadata)
-                    VALUES ($1, $2, $3, $4, $5)
-                    RETURNING id::text
-                    """,
-                    title,
-                    source,
-                    file_hash,
-                    content,
-                    json.dumps(metadata),
-                )
-
-                document_id = doc["id"]
-
-                for chunk in chunks:
-                    embedding = (
-                        "[" + ",".join(map(str, chunk.embedding)) + "]"
-                        if chunk.embedding
-                        else None
-                    )
-
-                    await conn.execute(
+                try:
+                    doc = await conn.fetchrow(
                         """
-                        INSERT INTO chunks
-                        (document_id, content, embedding, chunk_index, metadata, token_count)
-                        VALUES ($1::uuid, $2, $3::vector, $4, $5, $6)
+                        INSERT INTO documents (title, source, file_hash, content, metadata)
+                        VALUES ($1, $2, $3, $4, $5)
+                        RETURNING id::text
                         """,
-                        document_id,
-                        chunk.content,
-                        embedding,
-                        chunk.index,
-                        json.dumps(chunk.metadata),
-                        chunk.token_count,
+                        title,
+                        source,
+                        file_hash,
+                        content,
+                        json.dumps(metadata),
                     )
 
-                return document_id
+                    document_id = doc["id"]
+
+                    for chunk in chunks:
+                        embedding = (
+                            "[" + ",".join(map(str, chunk.embedding)) + "]"
+                            if chunk.embedding
+                            else None
+                        )
+
+                        await conn.execute(
+                            """
+                            INSERT INTO chunks
+                            (document_id, content, embedding, chunk_index, metadata, token_count)
+                            VALUES ($1::uuid, $2, $3::vector, $4, $5, $6)
+                            """,
+                            document_id,
+                            chunk.content,
+                            embedding,
+                            chunk.index,
+                            json.dumps(chunk.metadata),
+                            chunk.token_count,
+                        )
+
+                    return document_id
+                except asyncpg.exceptions.UniqueViolationError:
+                    # Another process likely inserted the same file_hash concurrently.
+                    # Return the existing document id instead of failing.
+                    existing = await conn.fetchrow(
+                        """
+                        SELECT id::text FROM documents WHERE file_hash = $1
+                        """,
+                        file_hash,
+                    )
+                    if existing:
+                        return existing["id"]
+                    # If we can't find it, re-raise the original error
+                    raise
