@@ -1,72 +1,218 @@
 <!DOCTYPE html>
-<html>
+<html lang="en">
 <head>
-    <title>Regulatory RAG System</title>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width,initial-scale=1" />
+    <title>Regulatory RAG Chat</title>
     <link rel="stylesheet" href="/static/style.css">
+    <script src="https://unpkg.com/htmx.org@1.9.2"></script>
 </head>
 <body>
 
-<h1>📘 Regulatory RAG System</h1>
+<header class="topbar">
+    <h1>📘 Regulatory RAG Chat</h1>
+    <p class="muted">Ask regulatory questions and see source citations.</p>
+</header>
 
-<div class="container">
+<main class="main-grid">
 
-    <!-- ================= INGEST UI ================= -->
-    <div class="box">
+    <section class="panel">
         <h2>📂 Ingest Document</h2>
 
-        <form action="/ingest-ui" method="post" enctype="multipart/form-data">
-            <input type="file" name="file" required>
-            <br><br>
-            <button type="submit">Ingest</button>
+        <form id="ingest-form" action="/ingest" hx-post="/ingest" hx-encoding="multipart/form-data" hx-swap="none">
+            <input type="file" name="file" required />
+            <div class="row">
+                <button type="submit" class="btn">Ingest</button>
+                <div id="ingest-result" class="inline-msg"></div>
+            </div>
         </form>
 
-        {% if ingest_message %}
-        <p class="success">{{ ingest_message }}</p>
-        {% endif %}
-    </div>
+        <hr />
 
-    <!-- ================= QUERY UI ================= -->
-    <div class="box">
-        <h2>💬 Ask a Question</h2>
+        <h3>Documents</h3>
+        <div id="documents-list">Loading…</div>
 
-        <form action="/query-ui" method="post">
-            <label>Question</label><br>
-            <textarea name="question" rows="4" required>{{ question or "" }}</textarea>
+    </section>
 
-            <br><br>
+    <section class="panel chat-panel">
+        <div class="chat-header">
+            <h2>💬 Chat</h2>
+            <div class="controls">
+                <label for="doc-filter">Restrict</label>
+                <select id="doc-filter"></select>
+            </div>
+        </div>
 
-            <label>Thread ID (optional)</label><br>
-            <input type="text" name="thread_id" value="{{ thread_id or "" }}">
+        <div id="chat-window" class="chat-window" aria-live="polite"></div>
 
-            <br><br>
-
-            <label>Filters (JSON, optional)</label><br>
-            <input type="text" name="filters" placeholder='{"title": "R0r5e"}'>
-
-            <br><br>
-
-            <button type="submit">Ask</button>
+        <form id="query-form" class="query-form" action="/query" hx-post="/query" hx-swap="none">
+            <input type="hidden" id="thread-id" name="thread_id" />
+            <textarea name="question" id="question-input" rows="2" placeholder="Ask a regulatory question..." required></textarea>
+            <div class="row">
+                <button type="submit" class="btn primary">Send</button>
+                <div id="query-status" class="inline-msg"></div>
+            </div>
         </form>
+    </section>
 
-        {% if answer %}
-        <hr>
-        <h3>Answer</h3>
-        <p>{{ answer }}</p>
+</main>
 
-        <h4>Citations</h4>
-        <ul>
-            {% for c in citations %}
-            <li>
-                📄 {{ c.source }} <br>
-                Document ID: {{ c.document_id }} <br>
-                Chunk ID: {{ c.chunk_id }}
-            </li>
-            {% endfor %}
-        </ul>
-        {% endif %}
-    </div>
+<script>
+// Minimal client-side logic to use HTMX for requests but render JSON responses
+function uuid() {
+    if (window.crypto && crypto.randomUUID) return crypto.randomUUID();
+    return 'session-' + Math.random().toString(36).slice(2, 10);
+}
 
-</div>
+const threadIdEl = document.getElementById('thread-id');
+threadIdEl.value = uuid();
+
+async function refreshDocuments(){
+    try{
+        const res = await fetch('/documents');
+        const docs = await res.json();
+        const list = document.getElementById('documents-list');
+        const sel = document.getElementById('doc-filter');
+        list.innerHTML = '';
+        sel.innerHTML = '';
+        const allOpt = document.createElement('option');
+        allOpt.value = '';
+        allOpt.textContent = 'All documents';
+        sel.appendChild(allOpt);
+
+        if (!docs || docs.length === 0) {
+            list.innerHTML = '<p class="muted">No documents</p>';
+            return;
+        }
+
+        const ul = document.createElement('ul');
+        for(const d of docs){
+            const li = document.createElement('li');
+            li.innerHTML = `<strong>${escapeHtml(d.title)}</strong> <span class="muted">(${d.id || '—'})</span>`;
+            const del = document.createElement('button');
+            del.textContent = 'Delete';
+            del.className = 'btn small danger';
+            del.style.marginLeft='10px';
+            del.onclick = async ()=>{
+                if(!confirm(`Delete '${d.title}'?`)) return;
+                const r = await fetch('/documents/' + encodeURIComponent(d.title), {method:'DELETE'});
+                if(r.ok){
+                    refreshDocuments();
+                    appendSystemMessage(`Deleted '${d.title}'`);
+                }else{
+                    const t = await r.text();
+                    appendSystemMessage('Delete failed: '+t);
+                }
+            };
+            li.appendChild(del);
+            ul.appendChild(li);
+
+            // add to select
+            const op = document.createElement('option');
+            op.value = d.title;
+            op.textContent = d.title;
+            sel.appendChild(op);
+        }
+        list.appendChild(ul);
+    }catch(e){
+        document.getElementById('documents-list').innerHTML = '<p class="muted">Error loading documents</p>';
+    }
+}
+
+function escapeHtml(s){
+    return (s+'').replace(/[&<>\\\"]/g, c=>({ '&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;' }[c]));
+}
+
+function appendUserMessage(text){
+    const win = document.getElementById('chat-window');
+    const div = document.createElement('div');
+    div.className = 'chat-msg user';
+    div.innerHTML = `<div class="bubble">${escapeHtml(text)}</div>`;
+    win.appendChild(div);
+    win.scrollTop = win.scrollHeight;
+}
+
+function appendAssistantMessage(text, citations){
+    const win = document.getElementById('chat-window');
+    const div = document.createElement('div');
+    div.className = 'chat-msg assistant';
+    let html = `<div class="bubble">${escapeHtml(text)}</div>`;
+    if(citations && citations.length){
+        html += '<details class="citations"><summary>📑 Citations</summary><ul>';
+        for(const c of citations){
+            const src = c.source || c['source'] || 'unknown';
+            const docid = c.document_id || c['document_id'] || c.documentId || 'unknown';
+            const chunk = c.chunk_id || c['chunk_id'] || c.chunkId || 'unknown';
+            html += `<li><strong>${escapeHtml(src)}</strong><br/>Document ID: <code>${escapeHtml(docid)}</code><br/>Chunk ID: <code>${escapeHtml(chunk)}</code></li>`;
+        }
+        html += '</ul></details>';
+    }
+    div.innerHTML = html;
+    win.appendChild(div);
+    win.scrollTop = win.scrollHeight;
+}
+
+function appendSystemMessage(text){
+    const win = document.getElementById('chat-window');
+    const div = document.createElement('div');
+    div.className = 'chat-msg system';
+    div.innerHTML = `<div class="bubble muted">${escapeHtml(text)}</div>`;
+    win.appendChild(div);
+    win.scrollTop = win.scrollHeight;
+}
+
+document.getElementById('ingest-form').addEventListener('submit', function(ev){
+    ev.preventDefault();
+    const form = ev.currentTarget;
+    const fd = new FormData(form);
+    document.getElementById('ingest-result').textContent = 'Uploading...';
+    fetch(form.action, {method:'POST', body:fd}).then(async r=>{
+        const data = await r.json().catch(()=>null);
+        if(data && data.message){
+            document.getElementById('ingest-result').textContent = data.message;
+            refreshDocuments();
+        }else{
+            document.getElementById('ingest-result').textContent = 'Ingest completed';
+            refreshDocuments();
+        }
+    }).catch(e=>{
+        document.getElementById('ingest-result').textContent = 'Upload failed';
+    });
+});
+
+document.getElementById('query-form').addEventListener('submit', function(ev){
+    ev.preventDefault();
+    const form = ev.currentTarget;
+    const q = document.getElementById('question-input').value;
+    const thread = document.getElementById('thread-id').value;
+    const filterSel = document.getElementById('doc-filter');
+    const selected = filterSel.value;
+    const payload = { question: q, thread_id: thread };
+    if(selected) payload.filters = { title: selected };
+
+    appendUserMessage(q);
+    document.getElementById('query-status').textContent = 'Thinking...';
+
+    fetch(form.action, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(payload)
+    }).then(async r=>{
+        const data = await r.json();
+        document.getElementById('query-status').textContent = '';
+        appendAssistantMessage(data.answer || '(no answer)', data.citations || []);
+    }).catch(e=>{
+        document.getElementById('query-status').textContent = 'Error';
+        appendSystemMessage('Query failed');
+    }).finally(()=>{
+        document.getElementById('question-input').value = '';
+    });
+});
+
+// init
+refreshDocuments();
+
+</script>
 
 </body>
 </html>
