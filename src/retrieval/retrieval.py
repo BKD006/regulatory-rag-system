@@ -13,11 +13,11 @@ import asyncio
 import asyncpg
 from typing import List, Dict, Any, Optional
 from collections import defaultdict
-
 from langgraph.graph import StateGraph, START
-
 from src.embeddings.embedder import create_embedder
 from utils.models import RetrievedChunk, RetrievalState
+from logger import GLOBAL_LOGGER as log
+from exception.custom_exception import RegulatoryRAGException
 
 
 class HybridRetriever:
@@ -51,75 +51,99 @@ class HybridRetriever:
         self.embedder = create_embedder()
         self.graph = self._build_graph()
 
+        log.info(
+            "hybrid_retriever_initialized",
+            top_k=top_k,
+            bm25_k=bm25_k,
+            vector_k=vector_k,
+        )
+
     # -------------------------------------------------
     # DB helpers
     # -------------------------------------------------
 
     async def _get_conn(self):
-        return await asyncpg.connect(self.database_url)
+        try:
+            return await asyncpg.connect(self.database_url)
+        except Exception as e:
+            log.error("db_connection_failed", error=str(e))
+            raise
 
     def _parse_json(self, val):
         return json.loads(val) if isinstance(val, str) else val
 
     # -------------------------------------------------
-    # BM25 Node (FILTERED)
+    # BM25 Node
     # -------------------------------------------------
 
     async def _bm25_node(self, state: RetrievalState):
         async def _run():
             conn = await self._get_conn()
+            try:
+                filters = state.filters or {}
+                title_filter = filters.get("title")
 
-            filters = state.filters or {}
-            title_filter = filters.get("title")
+                rows = await conn.fetch(
+                    """
+                    SELECT
+                        c.id::text AS chunk_id,
+                        c.document_id::text,
+                        c.content,
+                        ts_rank_cd(
+                            to_tsvector('english', c.content),
+                            plainto_tsquery('english', $1)
+                        ) AS score,
+                        d.title AS source,
+                        c.metadata
+                    FROM chunks c
+                    JOIN documents d ON d.id = c.document_id
+                    WHERE to_tsvector('english', c.content)
+                          @@ plainto_tsquery('english', $1)
+                      AND ($2::text IS NULL OR d.title = $2)
+                    ORDER BY score DESC
+                    LIMIT $3;
+                    """,
+                    state.user_query,
+                    title_filter,
+                    self.bm25_k,
+                )
 
-            rows = await conn.fetch(
-                """
-                SELECT
-                    c.id::text AS chunk_id,
-                    c.document_id::text,
-                    c.content,
-                    ts_rank_cd(
-                        to_tsvector('english', c.content),
-                        plainto_tsquery('english', $1)
-                    ) AS score,
-                    d.title AS source,
-                    c.metadata
-                FROM chunks c
-                JOIN documents d ON d.id = c.document_id
-                WHERE to_tsvector('english', c.content)
-                      @@ plainto_tsquery('english', $1)
-                  AND ($2::text IS NULL OR d.title = $2)
-                ORDER BY score DESC
-                LIMIT $3;
-                """,
-                state.user_query,
-                title_filter,
-                self.bm25_k,
-            )
-
-            await conn.close()
-
-            return {
-                "bm25_results": [
-                    RetrievedChunk(
-                        chunk_id=r["chunk_id"],
-                        document_id=r["document_id"],
-                        content=r["content"],
-                        score=float(r["score"]),
-                        source=r["source"],
-                        metadata=self._parse_json(r["metadata"]),
-                    )
-                    for r in rows
-                ]
-            }
+                return {
+                    "bm25_results": [
+                        RetrievedChunk(
+                            chunk_id=r["chunk_id"],
+                            document_id=r["document_id"],
+                            content=r["content"],
+                            score=float(r["score"]),
+                            source=r["source"],
+                            metadata=self._parse_json(r["metadata"]),
+                        )
+                        for r in rows
+                    ]
+                }
+            finally:
+                await conn.close()
 
         try:
-            return await asyncio.wait_for(_run(), timeout=self.bm25_timeout)
-        except Exception:
+            result = await asyncio.wait_for(
+                _run(), timeout=self.bm25_timeout
+            )
+            log.info(
+                "bm25_retrieval_completed",
+                result_count=len(result["bm25_results"]),
+            )
+            return result
+
+        except asyncio.TimeoutError:
+            log.warning("bm25_timeout", timeout=self.bm25_timeout)
+            return {"bm25_results": []}
+
+        except Exception as e:
+            log.error("bm25_retrieval_failed", error=str(e))
             return {"bm25_results": []}
 
     # -------------------------------------------------
-    # Vector Node (FILTERED)
+    # Vector Node
     # -------------------------------------------------
 
     async def _vector_node(self, state: RetrievalState):
@@ -131,51 +155,64 @@ class HybridRetriever:
             title_filter = filters.get("title")
 
             conn = await self._get_conn()
+            try:
+                rows = await conn.fetch(
+                    """
+                    SELECT
+                        c.id::text AS chunk_id,
+                        c.document_id::text,
+                        c.content,
+                        1 - (c.embedding <=> $1::vector) AS score,
+                        d.title AS source,
+                        c.metadata
+                    FROM chunks c
+                    JOIN documents d ON d.id = c.document_id
+                    WHERE c.embedding IS NOT NULL
+                      AND ($2::text IS NULL OR d.title = $2)
+                    ORDER BY c.embedding <=> $1::vector
+                    LIMIT $3;
+                    """,
+                    vector_literal,
+                    title_filter,
+                    self.vector_k,
+                )
 
-            rows = await conn.fetch(
-                """
-                SELECT
-                    c.id::text AS chunk_id,
-                    c.document_id::text,
-                    c.content,
-                    1 - (c.embedding <=> $1::vector) AS score,
-                    d.title AS source,
-                    c.metadata
-                FROM chunks c
-                JOIN documents d ON d.id = c.document_id
-                WHERE c.embedding IS NOT NULL
-                  AND ($2::text IS NULL OR d.title = $2)
-                ORDER BY c.embedding <=> $1::vector
-                LIMIT $3;
-                """,
-                vector_literal,
-                title_filter,
-                self.vector_k,
-            )
-
-            await conn.close()
-
-            return {
-                "vector_results": [
-                    RetrievedChunk(
-                        chunk_id=r["chunk_id"],
-                        document_id=r["document_id"],
-                        content=r["content"],
-                        score=float(r["score"]),
-                        source=r["source"],
-                        metadata=self._parse_json(r["metadata"]),
-                    )
-                    for r in rows
-                ]
-            }
+                return {
+                    "vector_results": [
+                        RetrievedChunk(
+                            chunk_id=r["chunk_id"],
+                            document_id=r["document_id"],
+                            content=r["content"],
+                            score=float(r["score"]),
+                            source=r["source"],
+                            metadata=self._parse_json(r["metadata"]),
+                        )
+                        for r in rows
+                    ]
+                }
+            finally:
+                await conn.close()
 
         try:
-            return await asyncio.wait_for(_run(), timeout=self.vector_timeout)
-        except Exception:
+            result = await asyncio.wait_for(
+                _run(), timeout=self.vector_timeout
+            )
+            log.info(
+                "vector_retrieval_completed",
+                result_count=len(result["vector_results"]),
+            )
+            return result
+
+        except asyncio.TimeoutError:
+            log.warning("vector_timeout", timeout=self.vector_timeout)
+            return {"vector_results": []}
+
+        except Exception as e:
+            log.error("vector_retrieval_failed", error=str(e))
             return {"vector_results": []}
 
     # -------------------------------------------------
-    # Fusion Node (STRICT)
+    # Fusion Node
     # -------------------------------------------------
 
     def _fusion_node(self, state: RetrievalState):
@@ -196,10 +233,17 @@ class HybridRetriever:
             reverse=True,
         )[: self.top_k]
 
+        log.info(
+            "retrieval_fusion_completed",
+            bm25=len(state.bm25_results),
+            vector=len(state.vector_results),
+            fused=len(fused),
+        )
+
         return {"fused_results": fused}
 
     # -------------------------------------------------
-    # Graph Wiring
+    # Graph wiring
     # -------------------------------------------------
 
     def _build_graph(self):
@@ -226,10 +270,28 @@ class HybridRetriever:
         filters: Optional[Dict[str, Any]] = None,
     ) -> List[RetrievedChunk]:
 
-        state = RetrievalState(
-            user_query=query,
-            filters=filters or {},
+        log.info(
+            "retrieval_started",
+            has_filters=bool(filters),
         )
 
-        final_state = await self.graph.ainvoke(state)
-        return final_state["fused_results"]
+        try:
+            state = RetrievalState(
+                user_query=query,
+                filters=filters or {},
+            )
+
+            final_state = await self.graph.ainvoke(state)
+
+            results = final_state.get("fused_results", [])
+
+            log.info(
+                "retrieval_completed",
+                result_count=len(results),
+            )
+
+            return results
+
+        except Exception as e:
+            log.error("retrieval_pipeline_failed", error=str(e))
+            raise RegulatoryRAGException(e)

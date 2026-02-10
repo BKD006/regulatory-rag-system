@@ -3,31 +3,33 @@ Simple embedding generator for RAG.
 
 - Uses ModelLoader.load_embeddings()
 - Async-safe (runs sync calls in thread)
-- No retries / caching / batching complexity
+- Batch-level logging only
 """
 
 import asyncio
-import logging
 from typing import List, Optional, Callable
 from datetime import datetime
-
 from src.chunking.chunker import DocumentChunk
 from utils.model_loader import ModelLoader
-
-logger = logging.getLogger(__name__)
+from logger import GLOBAL_LOGGER as log
+from exception.custom_exception import RegulatoryRAGException
 
 
 class EmbeddingGenerator:
     """
-    Minimal embedding generator.
+    Minimal, production-safe embedding generator.
     """
 
     def __init__(self):
-        # Single source of truth
-        self.embedding_client = ModelLoader().load_embeddings()
+        try:
+            self.embedding_client = ModelLoader().load_embeddings()
+            log.info("embedding_client_initialized")
+        except Exception as e:
+            log.error("embedding_client_init_failed", error=str(e))
+            raise RegulatoryRAGException(e)
 
     # -------------------------------------------------
-    # Internal helpers
+    # Internal helpers (NO logging here)
     # -------------------------------------------------
 
     async def _embed_documents(self, texts: List[str]) -> List[List[float]]:
@@ -60,35 +62,62 @@ class EmbeddingGenerator:
         """
         Attach embeddings to chunks.
         """
+
         if not chunks:
             return []
 
-        logger.info(f"Embedding {len(chunks)} chunks")
+        log.info(
+            "embedding_started",
+            chunk_count=len(chunks),
+        )
 
-        texts = [c.content for c in chunks]
-        vectors = await self._embed_documents(texts)
+        start_time = datetime.now()
 
-        embedded_chunks: List[DocumentChunk] = []
+        try:
+            texts = [c.content for c in chunks]
+            vectors = await self._embed_documents(texts)
 
-        for idx, (chunk, vector) in enumerate(zip(chunks, vectors), start=1):
-            chunk.embedding = vector
-            chunk.metadata.update(
-                {
-                    "embedding_generated_at": datetime.now().isoformat(),
-                }
+            for idx, (chunk, vector) in enumerate(zip(chunks, vectors), start=1):
+                chunk.embedding = vector
+                chunk.metadata.update(
+                    {
+                        "embedding_generated_at": datetime.now().isoformat(),
+                    }
+                )
+
+                if progress_callback:
+                    progress_callback(idx, len(chunks))
+
+            duration_ms = (
+                datetime.now() - start_time
+            ).total_seconds() * 1000
+
+            log.info(
+                "embedding_completed",
+                chunk_count=len(chunks),
+                duration_ms=int(duration_ms),
             )
-            embedded_chunks.append(chunk)
 
-            if progress_callback:
-                progress_callback(idx, len(chunks))
+            return chunks
 
-        return embedded_chunks
+        except Exception as e:
+            log.error(
+                "embedding_failed",
+                chunk_count=len(chunks),
+                error=str(e),
+            )
+            raise RegulatoryRAGException(e)
 
     async def embed_query(self, query: str) -> List[float]:
         """
         Generate embedding for retrieval query.
         """
-        return await self._embed_query(query)
+
+        try:
+            return await self._embed_query(query)
+        except Exception as e:
+            log.error("query_embedding_failed", error=str(e))
+            raise RegulatoryRAGException(e)
 
 
 # -------------------------------------------------

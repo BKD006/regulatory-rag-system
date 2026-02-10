@@ -6,24 +6,19 @@ Features:
 - Idempotent ingestion using file hash
 - Skip unchanged documents
 - Update database when document content changes
-- Uses DoclingHybridChunker / SimpleChunker
-- Uses Titan embeddings via embedder.py
 """
 
 import os
-import logging
-import json
 import glob
+import json
 import hashlib
 from pathlib import Path
 from typing import List, Dict, Any, Optional
 from datetime import datetime
-
 from dotenv import load_dotenv
-
+import asyncpg
 from src.chunking.chunker import ChunkingConfig, create_chunker, DocumentChunk
 from src.embeddings.embedder import create_embedder
-
 from utils.db_utils import (
     initialize_database,
     close_database,
@@ -31,20 +26,15 @@ from utils.db_utils import (
     get_document_by_source,
     delete_document_and_chunks,
 )
-import asyncpg
 from utils import db_utils
-
 from utils.models import IngestionConfig, IngestionResult
-
 from docling.document_converter import DocumentConverter
+from logger import GLOBAL_LOGGER as log
+from exception.custom_exception import RegulatoryRAGException
 
-# -------------------------------------------------------------------
 
 load_dotenv()
-logger = logging.getLogger(__name__)
-
 SUPPORTED_EXTENSIONS = {".pdf", ".md", ".txt"}
-
 
 class DocumentIngestionPipeline:
     """Pipeline for ingesting documents into PostgreSQL + pgvector."""
@@ -75,15 +65,28 @@ class DocumentIngestionPipeline:
     # ------------------------------------------------------------------
 
     async def initialize(self):
-        if not self._initialized:
+        if self._initialized:
+            return
+
+        try:
             await initialize_database()
             self._initialized = True
-            logger.info("Ingestion pipeline initialized")
+            log.info("ingestion_pipeline_initialized")
+        except Exception as e:
+            log.error("db_initialization_failed", error=str(e))
+            raise RegulatoryRAGException(e)
 
     async def close(self):
-        if self._initialized:
+        if not self._initialized:
+            return
+
+        try:
             await close_database()
             self._initialized = False
+            log.info("ingestion_pipeline_closed")
+        except Exception as e:
+            log.error("db_shutdown_failed", error=str(e))
+            raise RegulatoryRAGException(e)
 
     # ------------------------------------------------------------------
     # Public API
@@ -100,31 +103,48 @@ class DocumentIngestionPipeline:
         document_files = self._find_document_files()
 
         if not document_files:
-            logger.warning("No supported documents found")
+            log.warning("no_supported_documents_found")
             return []
+
+        log.info(
+            "ingestion_started",
+            document_count=len(document_files),
+        )
 
         results: List[IngestionResult] = []
 
-        for idx, file_path in enumerate(document_files):
+        for idx, file_path in enumerate(document_files, start=1):
             try:
-                logger.info(f"Processing {idx + 1}/{len(document_files)}: {file_path}")
+                log.info(
+                    "document_processing_started",
+                    file=str(file_path),
+                    index=idx,
+                    total=len(document_files),
+                )
+
                 result = await self._ingest_single_document(file_path)
                 results.append(result)
 
                 if progress_callback:
-                    progress_callback(idx + 1, len(document_files))
+                    progress_callback(idx, len(document_files))
 
-            except Exception as e:
-                logger.exception(f"Failed to ingest {file_path}")
+            except RegulatoryRAGException as e:
+                # Already enriched, just log once
+                log.error("document_ingestion_failed", error=str(e))
                 results.append(
                     IngestionResult(
                         document_id="",
-                        title=os.path.basename(file_path),
+                        title=Path(file_path).name,
                         chunks_created=0,
                         processing_time_ms=0,
                         errors=[str(e)],
                     )
                 )
+
+        log.info(
+            "ingestion_completed",
+            processed=len(results),
+        )
 
         return results
 
@@ -135,93 +155,132 @@ class DocumentIngestionPipeline:
     async def _ingest_single_document(self, file_path: str) -> IngestionResult:
         start_time = datetime.now()
 
-        content, docling_doc = self._read_document(file_path)
-        title = self._extract_title(content, file_path)
-        #force title into retrievable text
-        content = f"# {title}\n\n{content}"
-        source = os.path.relpath(file_path, self.documents_folder)
-        metadata = self._extract_document_metadata(content, file_path)
+        try:
+            content, docling_doc = self._read_document(file_path)
+            title = self._extract_title(content, file_path)
 
-        file_hash = self._compute_file_hash(content)
+            # Force title into retrievable text
+            content = f"# {title}\n\n{content}"
 
-        # -------------------------------
-        # Idempotency check (hash-based)
-        # -------------------------------
-        existing = await get_document_by_hash(file_hash)
-        if existing:
-            logger.info(f"Skipping unchanged document: {title}")
-            return IngestionResult(
-                document_id=existing["id"],
+            source = os.path.relpath(file_path, self.documents_folder)
+            metadata = self._extract_document_metadata(content, file_path)
+            file_hash = self._compute_file_hash(content)
+
+            # -------------------------------
+            # Idempotency check
+            # -------------------------------
+            existing = await get_document_by_hash(file_hash)
+            if existing:
+                log.info(
+                    "document_skipped_hash_match",
+                    title=title,
+                )
+                return IngestionResult(
+                    document_id=existing["id"],
+                    title=title,
+                    chunks_created=0,
+                    processing_time_ms=0,
+                    errors=[],
+                )
+
+            # -------------------------------
+            # Update existing source
+            # -------------------------------
+            existing_source = await get_document_by_source(source)
+            if existing_source:
+                log.info(
+                    "document_updated_existing_source",
+                    title=title,
+                )
+                await delete_document_and_chunks(existing_source["id"])
+
+            # -------------------------------
+            # Chunk
+            # -------------------------------
+            chunks = await self.chunker.chunk_document(
+                content=content,
                 title=title,
-                chunks_created=0,
-                processing_time_ms=0,
+                source=source,
+                metadata=metadata,
+                docling_doc=docling_doc,
+            )
+
+            if not chunks:
+                log.warning(
+                    "no_chunks_created",
+                    title=title,
+                )
+                return IngestionResult(
+                    document_id="",
+                    title=title,
+                    chunks_created=0,
+                    processing_time_ms=0,
+                    errors=["No chunks created"],
+                )
+
+            log.info(
+                "chunking_completed",
+                title=title,
+                chunk_count=len(chunks),
+            )
+
+            # -------------------------------
+            # Embed
+            # -------------------------------
+            embedded_chunks = await self.embedder.embed_chunks(chunks)
+
+            log.info(
+                "embedding_completed",
+                title=title,
+                chunk_count=len(embedded_chunks),
+            )
+
+            # -------------------------------
+            # Persist
+            # -------------------------------
+            document_id = await self._save_to_postgres(
+                title=title,
+                source=source,
+                content=content,
+                file_hash=file_hash,
+                chunks=embedded_chunks,
+                metadata=metadata,
+            )
+
+            processing_time = (
+                datetime.now() - start_time
+            ).total_seconds() * 1000
+
+            log.info(
+                "document_ingested",
+                title=title,
+                document_id=document_id,
+                duration_ms=int(processing_time),
+            )
+
+            return IngestionResult(
+                document_id=document_id,
+                title=title,
+                chunks_created=len(chunks),
+                processing_time_ms=processing_time,
                 errors=[],
             )
 
-        # ----------------------------------------
-        # Same source but changed content → update
-        # ----------------------------------------
-        existing_source = await get_document_by_source(source)
-        if existing_source:
-            logger.info(f"Updating modified document: {title}")
-            await delete_document_and_chunks(existing_source["id"])
-
-        # -------------------------------
-        # Chunk
-        # -------------------------------
-        chunks = await self.chunker.chunk_document(
-            content=content,
-            title=title,
-            source=source,
-            metadata=metadata,
-            docling_doc=docling_doc,
-        )
-
-        if not chunks:
-            return IngestionResult(
-                document_id="",
-                title=title,
-                chunks_created=0,
-                processing_time_ms=0,
-                errors=["No chunks created"],
-            )
-
-        # -------------------------------
-        # Embed
-        # -------------------------------
-        embedded_chunks = await self.embedder.embed_chunks(chunks)
-
-        # -------------------------------
-        # Persist
-        # -------------------------------
-        document_id = await self._save_to_postgres(
-            title=title,
-            source=source,
-            content=content,
-            file_hash=file_hash,
-            chunks=embedded_chunks,
-            metadata=metadata,
-        )
-
-        processing_time = (datetime.now() - start_time).total_seconds() * 1000
-
-        return IngestionResult(
-            document_id=document_id,
-            title=title,
-            chunks_created=len(chunks),
-            processing_time_ms=processing_time,
-            errors=[],
-        )
+        except Exception as e:
+            raise RegulatoryRAGException(e)
 
     # ------------------------------------------------------------------
     # Helpers
     # ------------------------------------------------------------------
 
     def _find_document_files(self) -> List[str]:
-        files = []
+        files: List[str] = []
         for ext in SUPPORTED_EXTENSIONS:
             files.extend(
-                glob.glob(os.path.join(self.documents_folder, f"**/*{ext}"), recursive=True)
+                glob.glob(
+                    os.path.join(self.documents_folder, f"**/*{ext}"),
+                    recursive=True,
+                )
             )
         return files
 
@@ -233,15 +292,11 @@ class DocumentIngestionPipeline:
 
         if ext == ".pdf":
             result = self.converter.convert(file_path)
-
-            # Export markdown WITH structure
             content = result.document.export_to_markdown()
-
             return content, result.document
 
         with open(file_path, "r", encoding="utf-8") as f:
             return f.read(), None
-
 
     def _extract_title(self, content: str, file_path: str) -> str:
         for line in content.splitlines()[:10]:
@@ -249,7 +304,11 @@ class DocumentIngestionPipeline:
                 return line.strip()[2:].strip()
         return Path(file_path).stem
 
-    def _extract_document_metadata(self, content: str, file_path: str) -> Dict[str, Any]:
+    def _extract_document_metadata(
+        self,
+        content: str,
+        file_path: str,
+    ) -> Dict[str, Any]:
         return {
             "file_path": file_path,
             "file_name": Path(file_path).name,
@@ -258,7 +317,6 @@ class DocumentIngestionPipeline:
             "word_count": len(content.split()),
             "ingested_at": datetime.now().isoformat(),
         }
-
 
     async def _save_to_postgres(
         self,
@@ -310,9 +368,8 @@ class DocumentIngestionPipeline:
                         )
 
                     return document_id
+
                 except asyncpg.exceptions.UniqueViolationError:
-                    # Another process likely inserted the same file_hash concurrently.
-                    # Return the existing document id instead of failing.
                     existing = await conn.fetchrow(
                         """
                         SELECT id::text FROM documents WHERE file_hash = $1
@@ -320,6 +377,10 @@ class DocumentIngestionPipeline:
                         file_hash,
                     )
                     if existing:
+                        log.warning(
+                            "concurrent_ingest_detected",
+                            file_hash=file_hash,
+                        )
                         return existing["id"]
-                    # If we can't find it, re-raise the original error
+
                     raise

@@ -9,10 +9,7 @@ Answer Generation with Citations for Hybrid RAG.
 
 from typing import List
 from dataclasses import dataclass
-
 from langchain_core.messages import SystemMessage, HumanMessage
-from langchain_groq import ChatGroq
-
 from utils.models import RetrievedChunk
 from src.prompts.prompt_library import (
     ANSWER_SYSTEM_PROMPT,
@@ -20,7 +17,7 @@ from src.prompts.prompt_library import (
 )
 from utils.model_loader import ModelLoader
 from utils.observability import langfuse_callback
-
+from logger import GLOBAL_LOGGER as log
 
 # ------------------------------------------------------------------
 # Models
@@ -43,7 +40,8 @@ class AnswerGenerator:
     """
 
     def __init__(self):
-        self.llm= ModelLoader().load_llm()
+        self.llm = ModelLoader().load_llm()
+        log.info("answer_generator_initialized")
 
     # ------------------------------------------------------------------
     # Public API
@@ -59,6 +57,8 @@ class AnswerGenerator:
         """
 
         if not retrieved_chunks:
+            log.warning("answer_generation_no_chunks")
+
             return AnswerResult(
                 answer=(
                     "I could not find this information "
@@ -72,6 +72,11 @@ class AnswerGenerator:
         # --------------------------------------------------
         sources = {c.source for c in retrieved_chunks}
         if len(sources) != 1:
+            log.warning(
+                "multiple_sources_detected_in_answer_generation",
+                sources=list(sources),
+            )
+
             return AnswerResult(
                 answer=(
                     "This question cannot be answered safely "
@@ -81,6 +86,12 @@ class AnswerGenerator:
             )
 
         document_title = next(iter(sources))
+
+        log.info(
+            "answer_generation_started",
+            document=document_title,
+            chunk_count=len(retrieved_chunks),
+        )
 
         # --------------------------------------------------
         # Build strictly controlled source blocks
@@ -125,12 +136,14 @@ class AnswerGenerator:
         # LLM call
         # --------------------------------------------------
         response = await self.llm.ainvoke(messages)
-
         answer_text = response.content.strip()
 
-        # --------------------------------------------------
-        # Return ONLY the chunks we actually passed in
-        # --------------------------------------------------
+        log.info(
+            "answer_generation_completed",
+            document=document_title,
+            chunk_count=len(retrieved_chunks),
+        )
+
         return AnswerResult(
             answer=answer_text,
             citations=retrieved_chunks,
