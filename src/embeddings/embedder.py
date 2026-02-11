@@ -9,7 +9,7 @@ Simple embedding generator for RAG.
 import asyncio
 from typing import List, Optional, Callable
 from datetime import datetime
-from src.chunking.chunker import DocumentChunk
+from utils.models import DocumentChunk
 from utils.model_loader import ModelLoader
 from logger import GLOBAL_LOGGER as log
 from exception.custom_exception import RegulatoryRAGException

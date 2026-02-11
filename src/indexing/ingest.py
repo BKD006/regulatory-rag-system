@@ -17,7 +17,7 @@ from typing import List, Dict, Any, Optional
 from datetime import datetime
 from dotenv import load_dotenv
 import asyncpg
-from src.chunking.chunker import ChunkingConfig, create_chunker, DocumentChunk
+from src.chunking.chunker import create_chunker
 from src.embeddings.embedder import create_embedder
 from utils.db_utils import (
     initialize_database,
@@ -27,7 +27,7 @@ from utils.db_utils import (
     delete_document_and_chunks,
 )
 from utils import db_utils
-from utils.models import IngestionConfig, IngestionResult
+from utils.models import IngestionConfig, IngestionResult, DocumentChunk, ChunkingConfig
 from docling.document_converter import DocumentConverter
 from logger import GLOBAL_LOGGER as log
 from exception.custom_exception import RegulatoryRAGException

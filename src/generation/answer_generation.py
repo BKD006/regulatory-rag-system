@@ -8,9 +8,8 @@ Answer Generation with Citations for Hybrid RAG.
 """
 
 from typing import List
-from dataclasses import dataclass
 from langchain_core.messages import SystemMessage, HumanMessage
-from utils.models import RetrievedChunk
+from utils.models import RetrievedChunk, AnswerResult
 from src.prompts.prompt_library import (
     ANSWER_SYSTEM_PROMPT,
     ANSWER_USER_PROMPT_TEMPLATE,
@@ -18,16 +17,6 @@ from src.prompts.prompt_library import (
 from utils.model_loader import ModelLoader
 from utils.observability import langfuse_callback
 from logger import GLOBAL_LOGGER as log
-
-# ------------------------------------------------------------------
-# Models
-# ------------------------------------------------------------------
-
-@dataclass
-class AnswerResult:
-    answer: str
-    citations: List[RetrievedChunk]
-
 
 # ------------------------------------------------------------------
 # Answer Generator

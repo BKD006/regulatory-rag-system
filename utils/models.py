@@ -36,41 +36,6 @@ class IngestionResult(BaseModel):
     processing_time_ms: float
     errors: List[str] = Field(default_factory=list)
 
-
-# ------------------------------------------------------------------
-# Document model (DB representation)
-# ------------------------------------------------------------------
-
-class Document(BaseModel):
-    """
-    Represents a document stored in the database.
-    """
-    id: Optional[str] = None
-    title: str
-    source: str
-    file_hash: str
-    content: str
-    metadata: Dict[str, Any] = Field(default_factory=dict)
-    created_at: Optional[datetime] = None
-    updated_at: Optional[datetime] = None
-
-
-# ------------------------------------------------------------------
-# Chunk model (optional, useful for debugging / testing)
-# ------------------------------------------------------------------
-
-class Chunk(BaseModel):
-    """
-    Represents a chunk stored in the database.
-    """
-    id: Optional[str] = None
-    document_id: str
-    content: str
-    chunk_index: int
-    token_count: Optional[int] = None
-    metadata: Dict[str, Any] = Field(default_factory=dict)
-    created_at: Optional[datetime] = None
-
 # ------------------------------------------------------------------
 # Retriever models
 # ------------------------------------------------------------------
@@ -92,6 +57,7 @@ class RetrievalState(BaseModel):
     bm25_results: List[RetrievedChunk] = Field(default_factory=list)
     vector_results: List[RetrievedChunk] = Field(default_factory=list)
     fused_results: List[RetrievedChunk] = Field(default_factory=list)
+    
 # ------------------------------------------------------------------
 # Output models
 # ------------------------------------------------------------------
@@ -105,11 +71,9 @@ class Citation(BaseModel):
     document_id: str
     chunk_id: str
 
-
-class AnswerOutput(BaseModel):
+class AnswerResult(BaseModel):
     answer: str
-    evidence: List[str]
-    citations: List[Citation]
+    citations: List[RetrievedChunk]
 
 # ------------------------------------------------------------------
 # RAG State model
