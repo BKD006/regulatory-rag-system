@@ -15,6 +15,7 @@ from utils.db_utils import (
     delete_document_by_title,
     init_db_pool,
     close_db_pool,
+    get_chunk_by_id
 )
 from logger import GLOBAL_LOGGER as log
 from exception.custom_exception import RegulatoryRAGException
@@ -236,3 +237,39 @@ async def delete_document(title: str):
     except Exception as e:
         log.error("delete_document_failed", title=title, error=str(e))
         raise HTTPException(status_code=500, detail="Failed to delete document")
+
+# ------------------------------------------------------------------
+# Chunks
+# ------------------------------------------------------------------
+@app.get("/chunks/{chunk_id}")
+async def get_chunk(chunk_id: str):
+    try:
+        row = await get_chunk_by_id(chunk_id)
+
+        if not row:
+            log.warning("chunk_not_found", chunk_id=chunk_id)
+            raise HTTPException(
+                status_code=404,
+                detail="Chunk not found"
+            )
+
+        return {
+            "chunk_id": row["chunk_id"],
+            "document_id": row["document_id"],
+            "content": row["content"],
+            "metadata": row["metadata"],
+            "token_count": row["token_count"],
+        }
+
+    except ValueError:
+        raise HTTPException(
+            status_code=400,
+            detail="Invalid chunk_id format"
+        )
+
+    except Exception as e:
+        log.error("get_chunk_failed", chunk_id=chunk_id, error=str(e))
+        raise HTTPException(
+            status_code=500,
+            detail="Failed to retrieve chunk"
+        )
