@@ -198,3 +198,22 @@ async def delete_document_by_title(title: str):
                     error=str(e),
                 )
                 raise RegulatoryRAGException(e)
+
+async def get_chunk_by_id(chunk_id: str):
+    pool = get_pool()
+    async with pool.acquire() as conn:
+        row = await conn.fetchrow(
+            """
+            SELECT 
+                id::text AS chunk_id,
+                document_id::text,
+                content,
+                metadata,
+                token_count
+            FROM chunks
+            WHERE id = $1::uuid
+            """,
+            chunk_id,
+        )
+
+        return row
