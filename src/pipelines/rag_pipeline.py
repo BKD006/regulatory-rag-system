@@ -14,6 +14,7 @@ from utils.models import RAGState, RetrievedChunk
 from utils.helper_functions import format_citations
 from logger import GLOBAL_LOGGER as log
 from exception.custom_exception import RegulatoryRAGException
+import re
 
 
 class RAGPipeline:
@@ -122,26 +123,89 @@ class RAGPipeline:
             }
 
         try:
+            # ---------------------------------------------
+            # Generate Answer
+            # ---------------------------------------------
             result = await self.answer_generator.generate(
                 question=state.user_query,
                 retrieved_chunks=chunks,
             )
 
-            # 🔒 HARD citation filtering
-            citations = self.guardrails.filter_citations(
-                result.citations,
-                allowed_chunks=chunks,
+            answer_text = result.answer
+
+            # ---------------------------------------------
+            # Extract citation numbers from answer text
+            # Example: [1], [5], [12]
+            # ---------------------------------------------
+            citation_matches = re.findall(r"\[(\d+)\]", answer_text)
+
+            # Convert to zero-based indices
+            cited_indices = {
+                int(num) - 1
+                for num in citation_matches
+            }
+
+            # ---------------------------------------------
+            # Validate citation indices
+            # ---------------------------------------------
+            invalid_indices = [
+                idx for idx in cited_indices
+                if idx < 0 or idx >= len(chunks)
+            ]
+
+            if invalid_indices:
+                log.warning(
+                    "invalid_citation_indices_detected",
+                    invalid_indices=invalid_indices,
+                )
+                raise GuardrailViolation(
+                    f"Invalid citation numbers detected: {invalid_indices}"
+                )
+
+            # ---------------------------------------------
+            # Map indices to actual chunks
+            # ---------------------------------------------
+            cited_chunks = [
+                chunks[idx]
+                for idx in sorted(cited_indices)
+            ]
+
+            # ---------------------------------------------
+            # Deterministic citation validation
+            # ---------------------------------------------
+            self.guardrails.validate_citations(
+                used_chunks=chunks,
+                cited_chunk_ids=[c.chunk_id for c in cited_chunks],
+            )
+
+            # ---------------------------------------------
+            # Grounding enforcement
+            # ---------------------------------------------
+            self.guardrails.enforce_answer_grounded(
+                answer_text,
+                cited_chunks,
             )
 
             log.info(
                 "answer_generated",
-                chunks_used=len(chunks),
-                citations=len(citations),
+                chunks_provided=len(chunks),
+                citations_used=len(cited_chunks),
             )
 
             return {
-                "answer": result.answer,
-                "citations": citations,
+                "answer": answer_text,
+                "citations": cited_chunks,
+            }
+
+        except GuardrailViolation as e:
+            log.warning(
+                "answer_guardrail_blocked",
+                reason=str(e),
+            )
+
+            return {
+                "answer": str(e),
+                "citations": [],
             }
 
         except Exception as e:
