@@ -1,6 +1,19 @@
-from typing import List, Dict, Any, Tuple
+"""
+Deterministic HARD guardrails for Regulatory RAG.
+
+These guardrails:
+- Run before or after LLM deterministically
+- Do NOT depend on model behavior
+- Can STOP the pipeline safely
+"""
+
+from typing import List, Dict, Any, Optional
 from utils.models import RetrievedChunk
 
+
+# ==========================================================
+# Exception
+# ==========================================================
 
 class GuardrailViolation(Exception):
     """
@@ -10,14 +23,18 @@ class GuardrailViolation(Exception):
     pass
 
 
+# ==========================================================
+# Guardrails
+# ==========================================================
+
 class AnswerGuardrails:
     """
-    Raw Python guardrails for HARD safety enforcement.
+    Deterministic guardrails for RAG pipeline.
 
-    These guardrails:
-    - Run BEFORE LLM generation
-    - Can STOP the pipeline deterministically
-    - Do NOT depend on LLM behavior
+    Phases:
+    1. Retrieval-time
+    2. Generation-time (pre-LLM)
+    3. Post-generation
     """
 
     # ==========================================================
@@ -27,11 +44,11 @@ class AnswerGuardrails:
     @staticmethod
     def enforce_single_document(
         chunks: List[RetrievedChunk],
-        filters: Dict[str, Any],
+        filters: Optional[Dict[str, Any]],
     ) -> List[RetrievedChunk]:
         """
-        Enforce that all chunks come from a single document
-        when a document-level filter is provided.
+        If document-level filter is provided,
+        ensure all chunks come from that document.
         """
         if not filters:
             return chunks
@@ -63,16 +80,12 @@ class AnswerGuardrails:
             )
         return chunks
 
-    # ==========================================================
-    # Generation-time guardrails (AFTER retrieval, BEFORE LLM)
-    # ==========================================================
-
     @staticmethod
     def enforce_single_source(
         chunks: List[RetrievedChunk],
-    ):
+    ) -> None:
         """
-        Final HARD check: ensure only one document source exists.
+        Ensure all chunks come from a single document.
         """
         sources = {c.source for c in chunks}
 
@@ -87,12 +100,15 @@ class AnswerGuardrails:
 
     @staticmethod
     def validate_citations(
-        used_chunks: List[RetrievedChunk],
-        cited_chunk_ids: List[str],
-    ):
+        used_chunks: Optional[List[RetrievedChunk]],
+        cited_chunk_ids: Optional[List[str]],
+    ) -> None:
         """
         Ensure citations only reference chunks actually used.
         """
+        if not used_chunks or not cited_chunk_ids:
+            return  # safe no-op
+
         allowed_ids = {c.chunk_id for c in used_chunks}
 
         invalid = [
@@ -105,53 +121,14 @@ class AnswerGuardrails:
                 f"Invalid citations detected: {invalid}"
             )
 
-    # ==========================================================
-    # Convenience wrapper
-    # ==========================================================
-
-    @staticmethod
-    def apply_retrieval_guardrails(
-        chunks: List[RetrievedChunk],
-        filters: Dict[str, Any],
-        *,
-        min_chunks: int = 1,
-    ) -> List[RetrievedChunk]:
-        """
-        Apply ALL retrieval-time guardrails in order.
-        """
-        chunks = AnswerGuardrails.enforce_single_document(chunks, filters)
-        chunks = AnswerGuardrails.enforce_min_chunks(chunks, min_chunks)
-        AnswerGuardrails.enforce_single_source(chunks)
-        return chunks
-
-    @staticmethod
-    def validate_citations(
-        used_chunks: List[RetrievedChunk] | None,
-        cited_chunk_ids: List[str] | None,
-    ):
-        """
-        Ensure citations only reference chunks actually used.
-        """
-        if not used_chunks or not cited_chunk_ids:
-            return  # ✅ SAFE NO-OP
-
-        allowed_ids = {c.chunk_id for c in used_chunks}
-
-        invalid = [
-            cid for cid in cited_chunk_ids
-            if cid not in allowed_ids
-        ]
-
-        if invalid:
-            raise ValueError(
-                f"Invalid citations detected: {invalid}"
-            )
     @staticmethod
     def filter_citations(
-        citations: List[RetrievedChunk] | None,
+        citations: Optional[List[RetrievedChunk]],
         allowed_chunks: List[RetrievedChunk],
     ) -> List[RetrievedChunk]:
-
+        """
+        Remove any citations not present in allowed_chunks.
+        """
         if not citations:
             return []
 
@@ -161,3 +138,60 @@ class AnswerGuardrails:
             c for c in citations
             if c.chunk_id in allowed_ids
         ]
+
+    @staticmethod
+    def enforce_answer_grounded(
+        answer: str,
+        used_chunks: List[RetrievedChunk],
+        *,
+        min_overlap_ratio: float = 0.02,
+    ) -> None:
+        """
+        Basic grounding heuristic:
+        Ensure some overlap exists between answer text
+        and combined chunk content.
+
+        This is lightweight and deterministic.
+        """
+
+        if not answer.strip():
+            return
+
+        combined_text = " ".join(c.content for c in used_chunks)
+
+        # Simple token-based overlap
+        answer_tokens = set(answer.lower().split())
+        chunk_tokens = set(combined_text.lower().split())
+
+        if not chunk_tokens:
+            raise GuardrailViolation(
+                "No evidence available for grounding validation."
+            )
+
+        overlap = answer_tokens.intersection(chunk_tokens)
+
+        overlap_ratio = len(overlap) / max(len(answer_tokens), 1)
+
+        if overlap_ratio < min_overlap_ratio:
+            raise GuardrailViolation(
+                "Answer may not be sufficiently grounded in evidence."
+            )
+
+    # ==========================================================
+    # Convenience wrapper
+    # ==========================================================
+
+    @staticmethod
+    def apply_retrieval_guardrails(
+        chunks: List[RetrievedChunk],
+        filters: Optional[Dict[str, Any]],
+        *,
+        min_chunks: int = 1,
+    ) -> List[RetrievedChunk]:
+        """
+        Apply ALL retrieval-time guardrails in order.
+        """
+        chunks = AnswerGuardrails.enforce_single_document(chunks, filters)
+        chunks = AnswerGuardrails.enforce_min_chunks(chunks, min_chunks)
+        AnswerGuardrails.enforce_single_source(chunks) # It is a validation function, it will raise if violated but won't modify the chunks.
+        return chunks
