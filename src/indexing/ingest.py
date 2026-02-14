@@ -19,6 +19,7 @@ from dotenv import load_dotenv
 import asyncpg
 from src.chunking.chunker import create_chunker
 from src.embeddings.embedder import create_embedder
+from src.indexing.cleaning import DocumentCleaner
 from utils.db_utils import (
     initialize_database,
     close_database,
@@ -46,14 +47,13 @@ class DocumentIngestionPipeline:
     ):
         self.config = config
         self.documents_folder = documents_folder
-
+        self.cleaner = DocumentCleaner()
         self.chunker_config = ChunkingConfig(
             chunk_size=config.chunk_size,
             chunk_overlap=config.chunk_overlap,
             max_chunk_size=config.max_chunk_size,
             use_semantic_splitting=config.use_semantic_chunking,
         )
-
         self.chunker = create_chunker(self.chunker_config)
         self.embedder = create_embedder()
         self.converter = DocumentConverter()
@@ -157,6 +157,12 @@ class DocumentIngestionPipeline:
 
         try:
             content, docling_doc = self._read_document(file_path)
+            
+            #Apply cleaning steps
+            if docling_doc is not None:
+                content, cleaning_metadata=self.cleaner.clean(content, docling_doc)
+            else:
+                cleaning_metadata = {"layout_cleaning": False}
             title = self._extract_title(content, file_path)
 
             # Force title into retrievable text
@@ -164,6 +170,7 @@ class DocumentIngestionPipeline:
 
             source = os.path.relpath(file_path, self.documents_folder)
             metadata = self._extract_document_metadata(content, file_path)
+            metadata.update(cleaning_metadata)
             file_hash = self._compute_file_hash(content)
 
             # -------------------------------
