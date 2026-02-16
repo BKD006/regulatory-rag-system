@@ -6,7 +6,7 @@ Retrieval → Reranking → Guardrails → Answer Generation
 from typing import Dict, Any, Optional, List
 from langgraph.graph import StateGraph, START
 from langgraph.checkpoint.memory import MemorySaver
-from src.retrieval.retrieval import HybridRetriever
+from src.retrieval.hybrid_retriever_v2 import HybridRetriever
 from src.generation.answer_generation import AnswerGenerator
 from src.reranking.reranker import CrossEncoderReranker
 from src.guardrails.guardrails import AnswerGuardrails, GuardrailViolation
