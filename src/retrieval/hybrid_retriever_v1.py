@@ -1,12 +1,3 @@
-"""
-Hybrid Retrieval using LangGraph
-- BM25 + Vector (pgvector)
-- Parallel execution
-- Timeouts + fallback
-- Weighted fusion
-- STRICT metadata filters (NO leakage)
-"""
-
 import os
 import json
 import asyncio
@@ -21,9 +12,6 @@ from exception.custom_exception import RegulatoryRAGException
 
 
 class HybridRetriever:
-    """
-    Production-grade hybrid retriever with strict filtering.
-    """
 
     def __init__(
         self,
@@ -36,6 +24,29 @@ class HybridRetriever:
         bm25_timeout: float = 30,
         vector_timeout: float = 30,
     ):
+        """
+        Initialize the HybridRetriever (V1 - Weighted Rank Fusion).
+
+        This retriever performs hybrid search using:
+            - BM25 (PostgreSQL full-text search)
+            - Dense vector similarity (pgvector)
+            - Weighted Reciprocal Rank Fusion (RRF-style)
+            - Strict metadata filtering at query level
+
+        Retrieval nodes execute in parallel using LangGraph.
+
+        Parameters:
+            top_k (int): Number of final fused results to return.
+            bm25_k (int): Number of candidates retrieved from BM25.
+            vector_k (int): Number of candidates retrieved from vector search.
+            bm25_weight (float): Relative contribution of BM25 in fusion.
+            vector_weight (float): Relative contribution of vector search in fusion.
+            bm25_timeout (float): Timeout (seconds) for BM25 retrieval.
+            vector_timeout (float): Timeout (seconds) for vector retrieval.
+
+        Raises:
+            RuntimeError: If DATABASE_URL environment variable is not set.
+        """
         self.top_k = top_k
         self.bm25_k = bm25_k
         self.vector_k = vector_k
@@ -63,6 +74,15 @@ class HybridRetriever:
     # -------------------------------------------------
 
     async def _get_conn(self):
+        """
+        Create and return an asynchronous PostgreSQL connection.
+
+        Returns:
+            asyncpg.Connection: Active database connection.
+
+        Raises:
+            Exception: If database connection fails.
+        """
         try:
             return await asyncpg.connect(self.database_url)
         except Exception as e:
@@ -70,6 +90,18 @@ class HybridRetriever:
             raise
 
     def _parse_json(self, val):
+        """
+        Safely parse JSON metadata returned from the database.
+
+        Some PostgreSQL drivers may return JSON as a string.
+        This method ensures it is converted into a Python object.
+
+        Parameters:
+            val: JSON string or already parsed object.
+
+        Returns:
+            Parsed Python object if string, otherwise original value.
+        """
         return json.loads(val) if isinstance(val, str) else val
 
     # -------------------------------------------------
@@ -77,6 +109,28 @@ class HybridRetriever:
     # -------------------------------------------------
 
     async def _bm25_node(self, state: RetrievalState):
+        """
+        Execute BM25 full-text retrieval using PostgreSQL.
+
+        Performs:
+            - ts_rank_cd scoring
+            - Strict metadata filtering (e.g., title filter)
+            - Ordered retrieval by relevance score
+            - Timeout-protected execution
+            - Graceful fallback on failure
+
+        Parameters:
+            state (RetrievalState): Contains user_query and metadata filters.
+
+        Returns:
+            Dict containing:
+                {
+                    "bm25_results": List[RetrievedChunk]
+                }
+
+        Notes:
+            Returns empty results on timeout or failure to maintain pipeline stability.
+        """
         async def _run():
             conn = await self._get_conn()
             try:
@@ -147,6 +201,33 @@ class HybridRetriever:
     # -------------------------------------------------
 
     async def _vector_node(self, state: RetrievalState):
+        """
+        Execute dense vector similarity retrieval using pgvector.
+
+        Steps:
+            1. Generate embedding for user query
+            2. Perform cosine distance search in PostgreSQL
+            3. Apply strict metadata filtering
+            4. Return top-k candidates
+
+        Execution is:
+            - Asynchronous
+            - Timeout-protected
+            - Failure-resilient
+
+        Parameters:
+            state (RetrievalState): Contains user_query and metadata filters.
+
+        Returns:
+            Dict containing:
+                {
+                    "vector_results": List[RetrievedChunk]
+                }
+
+        Notes:
+            Similarity score is computed as:
+                1 - (embedding_distance)
+        """
         async def _run():
             embedding = await self.embedder.embed_query(state.user_query)
             vector_literal = "[" + ",".join(map(str, embedding)) + "]"
@@ -216,6 +297,33 @@ class HybridRetriever:
     # -------------------------------------------------
 
     def _fusion_node(self, state: RetrievalState):
+        """
+        Perform Weighted Reciprocal Rank Fusion (RRF-style).
+
+        Fusion logic:
+            - Combine BM25 and vector results
+            - Ignore raw retrieval scores
+            - Use rank position instead
+            - Apply weighted rank-based scoring:
+                weight / (rank + constant)
+
+        This method prioritizes:
+            - Robustness to score-scale mismatch
+            - Stability across heterogeneous retrievers
+            - Simplicity and reliability
+
+        Parameters:
+            state (RetrievalState): Contains bm25_results and vector_results.
+
+        Returns:
+            Dict containing:
+                {
+                    "fused_results": List[RetrievedChunk]
+                }
+
+        Notes:
+            This is rank-based fusion, not score-level fusion.
+        """
         scores = defaultdict(float)
         chunks: Dict[str, RetrievedChunk] = {}
 
@@ -247,6 +355,23 @@ class HybridRetriever:
     # -------------------------------------------------
 
     def _build_graph(self):
+        """
+        Construct and compile the LangGraph retrieval workflow.
+
+        Graph Structure:
+
+            START
+            ├── BM25 Node
+            ├── Vector Node
+            ↓
+            Fusion Node
+
+        Both retrieval nodes execute in parallel.
+        Fusion executes after both complete.
+
+        Returns:
+            Compiled LangGraph instance.
+        """
         graph = StateGraph(RetrievalState)
 
         graph.add_node("bm25", self._bm25_node)
@@ -269,6 +394,25 @@ class HybridRetriever:
         query: str,
         filters: Optional[Dict[str, Any]] = None,
     ) -> List[RetrievedChunk]:
+        """
+        Execute the full hybrid retrieval pipeline.
+
+        Pipeline:
+            1. Parallel BM25 and vector retrieval
+            2. Weighted rank-based fusion
+            3. Return top_k fused results
+
+        Parameters:
+            query (str): User query string.
+            filters (Optional[Dict[str, Any]]): Metadata filters
+                                            (e.g., document title).
+
+        Returns:
+            List[RetrievedChunk]: Final fused retrieval results.
+
+        Raises:
+            RegulatoryRAGException: If retrieval pipeline fails.
+        """
 
         log.info(
             "retrieval_started",
