@@ -37,6 +37,7 @@ async def init_db_pool():
             DATABASE_URL,
             min_size=1,
             max_size=10,
+            statement_cache_size=0
         )
         db_pool = _pool
         log.info("db_pool_initialized", min_size=1, max_size=10)
@@ -89,7 +90,7 @@ async def get_document_by_hash(file_hash: str):
         return await conn.fetchrow(
             """
             SELECT id::text
-            FROM documents
+            FROM public.documents
             WHERE file_hash = $1
             """,
             file_hash,
@@ -102,7 +103,7 @@ async def get_document_by_source(source: str):
         return await conn.fetchrow(
             """
             SELECT id::text
-            FROM documents
+            FROM public.documents
             WHERE source = $1
             """,
             source,
@@ -116,7 +117,7 @@ async def delete_document_and_chunks(document_id: str):
             try:
                 await conn.execute(
                     """
-                    DELETE FROM documents
+                    DELETE FROM public.documents
                     WHERE id = $1::uuid
                     """,
                     document_id,
@@ -141,7 +142,7 @@ async def list_documents() -> List[Dict[str, str]]:
         rows = await conn.fetch(
             """
             SELECT id::text, title
-            FROM documents
+            FROM public.documents
             ORDER BY title
             """
         )
@@ -154,7 +155,7 @@ async def list_document_titles() -> List[str]:
         rows = await conn.fetch(
             """
             SELECT DISTINCT title
-            FROM documents
+            FROM public.documents
             ORDER BY title
             """
         )
@@ -168,7 +169,7 @@ async def delete_document_by_title(title: str):
             row = await conn.fetchrow(
                 """
                 SELECT id
-                FROM documents
+                FROM public.documents
                 WHERE title = $1
                 """,
                 title,
@@ -180,7 +181,7 @@ async def delete_document_by_title(title: str):
             try:
                 await conn.execute(
                     """
-                    DELETE FROM documents
+                    DELETE FROM public.documents
                     WHERE id = $1
                     """,
                     row["id"],

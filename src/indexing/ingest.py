@@ -337,57 +337,55 @@ class DocumentIngestionPipeline:
 
         async with db_utils.db_pool.acquire() as conn:
             async with conn.transaction():
-                try:
-                    doc = await conn.fetchrow(
-                        """
-                        INSERT INTO documents (title, source, file_hash, content, metadata)
-                        VALUES ($1, $2, $3, $4, $5)
-                        RETURNING id::text
-                        """,
-                        title,
-                        source,
-                        file_hash,
-                        content,
-                        json.dumps(metadata),
+
+                # 1️⃣ Insert or reuse document
+                doc = await conn.fetchrow(
+                    """
+                    INSERT INTO public.documents
+                    (title, source, file_hash, content, metadata)
+                    VALUES ($1, $2, $3, $4, $5)
+                    ON CONFLICT (file_hash)
+                    DO UPDATE SET updated_at = now()
+                    RETURNING id::text
+                    """,
+                    title,
+                    source,
+                    file_hash,
+                    content,
+                    json.dumps(metadata),
+                )
+
+                document_id = doc["id"]
+
+                # 2️⃣ Delete existing chunks (important for re-ingest)
+                await conn.execute(
+                    """
+                    DELETE FROM public.chunks
+                    WHERE document_id = $1::uuid
+                    """,
+                    document_id,
+                )
+
+                # 3️⃣ Insert chunks
+                for chunk in chunks:
+                    embedding = (
+                        "[" + ",".join(map(str, chunk.embedding)) + "]"
+                        if chunk.embedding
+                        else None
                     )
 
-                    document_id = doc["id"]
-
-                    for chunk in chunks:
-                        embedding = (
-                            "[" + ",".join(map(str, chunk.embedding)) + "]"
-                            if chunk.embedding
-                            else None
-                        )
-
-                        await conn.execute(
-                            """
-                            INSERT INTO chunks
-                            (document_id, content, embedding, chunk_index, metadata, token_count)
-                            VALUES ($1::uuid, $2, $3::vector, $4, $5, $6)
-                            """,
-                            document_id,
-                            chunk.content,
-                            embedding,
-                            chunk.index,
-                            json.dumps(chunk.metadata),
-                            chunk.token_count,
-                        )
-
-                    return document_id
-
-                except asyncpg.exceptions.UniqueViolationError:
-                    existing = await conn.fetchrow(
+                    await conn.execute(
                         """
-                        SELECT id::text FROM documents WHERE file_hash = $1
+                        INSERT INTO public.chunks
+                        (document_id, content, embedding, chunk_index, metadata, token_count)
+                        VALUES ($1::uuid, $2, $3::vector, $4, $5, $6)
                         """,
-                        file_hash,
+                        document_id,
+                        chunk.content,
+                        embedding,
+                        chunk.index,
+                        json.dumps(chunk.metadata),
+                        chunk.token_count,
                     )
-                    if existing:
-                        log.warning(
-                            "concurrent_ingest_detected",
-                            file_hash=file_hash,
-                        )
-                        return existing["id"]
 
-                    raise
+                return document_id

@@ -149,8 +149,8 @@ class HybridRetriever:
                         ) AS score,
                         d.title AS source,
                         c.metadata
-                    FROM chunks c
-                    JOIN documents d ON d.id = c.document_id
+                    FROM public.chunks c
+                    JOIN public.documents d ON d.id = c.document_id
                     WHERE to_tsvector('english', c.content)
                           @@ plainto_tsquery('english', $1)
                       AND ($2::text IS NULL OR d.title = $2)
@@ -246,8 +246,8 @@ class HybridRetriever:
                         1 - (c.embedding <=> $1::vector) AS score,
                         d.title AS source,
                         c.metadata
-                    FROM chunks c
-                    JOIN documents d ON d.id = c.document_id
+                    FROM public.chunks c
+                    JOIN public.documents d ON d.id = c.document_id
                     WHERE c.embedding IS NOT NULL
                       AND ($2::text IS NULL OR d.title = $2)
                     ORDER BY c.embedding <=> $1::vector
