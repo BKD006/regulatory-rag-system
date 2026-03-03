@@ -5,7 +5,6 @@ Retrieval → Reranking → Guardrails → Answer Generation
 
 from typing import Dict, Any, Optional, List
 from langgraph.graph import StateGraph, START
-from langgraph.checkpoint.memory import MemorySaver
 from src.retrieval.hybrid_retriever_v2 import HybridRetriever
 from src.generation.answer_generation import AnswerGenerator
 from src.reranking.reranker import CrossEncoderReranker
@@ -15,7 +14,8 @@ from utils.helper_functions import format_citations
 from logger import GLOBAL_LOGGER as log
 from exception.custom_exception import RegulatoryRAGException
 import re
-
+from src.cache.cache_manager import LLMAnswerCacheManager
+from langsmith import traceable, get_current_run_tree
 
 class RAGPipeline:
     """
@@ -23,7 +23,10 @@ class RAGPipeline:
     """
 
     def __init__(self):
-        self.checkpointer = MemorySaver()
+        self.cache = LLMAnswerCacheManager(memory_maxsize=1000,
+                                           memory_ttl_seconds=300,     # 5 min L1
+                                           postgres_ttl_minutes=60     # 1 hour L2
+                                           )
         self.retriever = HybridRetriever()
         self.reranker = CrossEncoderReranker(top_k=6)
         self.answer_generator = AnswerGenerator()
@@ -35,7 +38,7 @@ class RAGPipeline:
     # -------------------------------------------------
     # LangGraph Nodes
     # -------------------------------------------------
-
+    @traceable(name="Retrieval")
     async def retrieval_node(self, state: RAGState) -> Dict[str, Any]:
         try:
             chunks = await self.retriever.retrieve(
@@ -53,7 +56,8 @@ class RAGPipeline:
         except Exception as e:
             log.error("retrieval_node_failed", error=str(e))
             raise
-
+    
+    @traceable(name="Rerank")
     async def rerank_node(self, state: RAGState) -> Dict[str, Any]:
         chunks = state.retrieved_chunks or []
 
@@ -85,7 +89,7 @@ class RAGPipeline:
             guarded_chunks = self.guardrails.apply_retrieval_guardrails(
                 chunks=chunks,
                 filters=state.filters,
-                min_chunks=1,
+                min_chunks=2,
             )
 
             log.info(
@@ -96,7 +100,7 @@ class RAGPipeline:
             return {"guarded_chunks": guarded_chunks}
 
         except GuardrailViolation as e:
-            # ⚠️ EXPECTED, SAFE REFUSAL (not an error)
+            # EXPECTED, SAFE REFUSAL (not an error)
             log.warning(
                 "guardrail_blocked",
                 reason=str(e),
@@ -108,6 +112,7 @@ class RAGPipeline:
                 "citations": [],
             }
 
+    @traceable(name="Answer_Generation")
     async def answer_node(self, state: RAGState) -> Dict[str, Any]:
         chunks = state.guarded_chunks or []
 
@@ -229,49 +234,88 @@ class RAGPipeline:
         graph.add_edge("rerank", "guardrails")
         graph.add_edge("guardrails", "answer")
 
-        return graph.compile(checkpointer=self.checkpointer)
+        return graph.compile()
 
     # -------------------------------------------------
     # Public API
     # -------------------------------------------------
-
+    @traceable(name="RAG_Run")
     async def run(
         self,
         query: str,
-        *,
-        thread_id: str,
         filters: Optional[Dict[str, Any]] = None,
     ) -> Dict[str, Any]:
 
         log.info(
             "rag_run_started",
             has_filters=bool(filters),
-            thread_id=thread_id,
         )
 
         try:
+            # -------------------------------------------------
+            # 1. Generate deterministic cache key
+            # -------------------------------------------------
+            cache_key = await self.cache.make_key(
+                question=query,
+                namespace=f"rag:{filters}"
+            )
+
+            # -------------------------------------------------
+            # 2. Check Hybrid Cache (L1 → L2)
+            # -------------------------------------------------
+            cached = await self.cache.get(cache_key)
+            run_tree = get_current_run_tree()
+            if run_tree:
+                run_tree.metadata.update({
+                    "has_filters": bool(filters),
+                    "cache_hit": cached is not None,
+                    "query_length": len(query),
+                })
+            if cached:
+                log.info("rag_cache_hit")
+                return cached
+
+            log.info("rag_cache_miss")
+
+            # -------------------------------------------------
+            # 3. Run Graph (cold path)
+            # -------------------------------------------------
             final_state = await self.graph.ainvoke(
                 RAGState(
                     user_query=query,
                     filters=filters or {},
-                ),
-                config={
-                    "configurable": {
-                        "thread_id": thread_id
-                    }
-                },
+                )
             )
+
+            raw_citations = format_citations(
+                final_state.get("citations", [])
+            )
+
+            # Ensure JSON-safe
+            safe_citations = [
+                c.model_dump() if hasattr(c, "model_dump") else c
+                for c in raw_citations
+            ]
+
+            response = {
+                "answer": final_state.get("answer"),
+                "citations": safe_citations,
+            }
+
+            # -------------------------------------------------
+            # 4. Store Only Valid Answers
+            # -------------------------------------------------
+            if response["answer"] and not response["answer"].startswith("The question cannot be answered safely"):
+                await self.cache.set(
+                    cache_key,
+                    query,
+                    response,
+                )
 
             log.info("rag_run_completed")
 
-            return {
-                "answer": final_state.get("answer"),
-                "citations": format_citations(
-                    final_state.get("citations", [])
-                ),
-            }
+            return response
 
         except Exception as e:
-            # 🚨 True system failure (not a guardrail refusal)
             log.error("rag_pipeline_failed", error=str(e))
             raise RegulatoryRAGException(e)
