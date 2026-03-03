@@ -15,7 +15,6 @@ from src.prompts.prompt_library import (
     ANSWER_USER_PROMPT_TEMPLATE,
 )
 from utils.model_loader import ModelLoader
-from utils.observability import langfuse_callback
 from logger import GLOBAL_LOGGER as log
 
 # ------------------------------------------------------------------
