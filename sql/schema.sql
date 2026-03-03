@@ -7,7 +7,7 @@ CREATE EXTENSION IF NOT EXISTS vector;
 -- =========================================================
 -- Documents table
 -- =========================================================
-CREATE TABLE IF NOT EXISTS documents (
+CREATE TABLE IF NOT EXISTS public.documents (
     id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
     title TEXT NOT NULL,
     source TEXT NOT NULL,
@@ -27,7 +27,7 @@ ON documents (source);
 -- =========================================================
 -- Chunks table
 -- =========================================================
-CREATE TABLE IF NOT EXISTS chunks (
+CREATE TABLE IF NOT EXISTS public.chunks (
     id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
     document_id UUID NOT NULL,
     content TEXT NOT NULL,
@@ -58,3 +58,17 @@ ON chunks (document_id);
 
 CREATE INDEX IF NOT EXISTS idx_chunks_chunk_index
 ON chunks (chunk_index);
+
+-- =========================================================
+-- Cache table for question-answer pairs
+-- =========================================================
+
+CREATE TABLE IF NOT EXISTS public.query_cache (
+    cache_key TEXT PRIMARY KEY,
+    question TEXT NOT NULL,
+    response JSONB NOT NULL,
+    created_at TIMESTAMP DEFAULT now()
+);
+
+CREATE INDEX IF NOT EXISTS idx_query_cache_created_at
+ON public.query_cache(created_at);
