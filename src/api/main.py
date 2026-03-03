@@ -4,7 +4,6 @@ from fastapi.templating import Jinja2Templates
 
 import os
 import shutil
-import uuid
 import json
 from src.indexing.ingest import DocumentIngestionPipeline
 from src.pipelines.rag_pipeline import RAGPipeline
@@ -165,37 +164,32 @@ async def query_rag(request: Request):
             detail=str(e),
         )
 
-    thread_id = qreq.thread_id or f"session-{uuid.uuid4()}"
-
     log.info(
         "query_received",
-        thread_id=thread_id,
         has_filters=bool(qreq.filters),
     )
 
     try:
         result = await rag_pipeline.run(
             query=qreq.question,
-            thread_id=thread_id,
             filters=qreq.filters,
         )
 
         return {
-            "thread_id": thread_id,
             "answer": result.get("answer"),
             "citations": result.get("citations", []),
         }
 
     except RegulatoryRAGException as e:
         # True system failure
-        log.error("rag_query_failed", error=str(e), thread_id=thread_id)
+        log.error("rag_query_failed", error=str(e))
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail="Failed to process query",
         )
 
     except Exception as e:
-        log.error("unexpected_query_error", error=str(e), thread_id=thread_id)
+        log.error("unexpected_query_error", error=str(e))
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail="Unexpected server error",
