@@ -1,222 +1,463 @@
 <!DOCTYPE html>
 <html lang="en">
 <head>
-    <meta charset="utf-8" />
-    <meta name="viewport" content="width=device-width,initial-scale=1" />
-    <title>Regulatory RAG Chat</title>
-    <link rel="stylesheet" href="/static/style.css">
-    <script src="https://unpkg.com/htmx.org@1.9.2"></script>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width,initial-scale=1" />
+<title>Regulatory RAG Chat</title>
+<link rel="stylesheet" href="/static/style.css">
+<script src="https://unpkg.com/htmx.org@1.9.2"></script>
 </head>
+
 <body>
 
 <header class="topbar">
-    <h1>📘 Regulatory RAG Chat</h1>
-    <p class="muted">Ask regulatory questions and see source citations.</p>
+<h1>📘 Regulatory RAG Chat</h1>
+<p class="muted">Ask regulatory questions and see source citations.</p>
 </header>
 
 <main class="main-grid">
 
-    <section class="panel">
-        <h2>📂 Ingest Document</h2>
+<section class="panel">
+<h2>📂 Ingest Document</h2>
 
-        <form id="ingest-form" action="/ingest">
-            <input type="file" name="file" required />
-            <div class="row">
-                <button type="submit" class="btn">Ingest</button>
-                <div id="ingest-result" class="inline-msg"></div>
-            </div>
-        </form>
+<form id="ingest-form" action="/ingest">
+<input type="file" name="file" required />
 
-        <hr />
+<div class="row">
+<button type="submit" class="btn">Ingest</button>
+<div id="ingest-result" class="inline-msg"></div>
+</div>
 
-        <h3>Documents</h3>
-        <div id="documents-list">Loading…</div>
+</form>
 
-    </section>
+<hr />
 
-    <section class="panel chat-panel">
-        <div class="chat-header">
-            <h2>💬 Chat</h2>
-            <div class="controls">
-                <label for="doc-filter">Restrict</label>
-                <select id="doc-filter"></select>
-            </div>
-        </div>
+<h3>Documents</h3>
+<div id="documents-list">Loading…</div>
 
-        <div id="chat-window" class="chat-window" aria-live="polite"></div>
+</section>
 
-        <form id="query-form" class="query-form" action="/query">
-            <input type="hidden" id="thread-id" name="thread_id" />
-            <textarea name="question" id="question-input" rows="2" placeholder="Ask a regulatory question..." required></textarea>
-            <div class="row">
-                <button type="submit" class="btn primary">Send</button>
-                <div id="query-status" class="inline-msg"></div>
-            </div>
-        </form>
-    </section>
+<section class="panel chat-panel">
+
+<div class="chat-header">
+<h2>💬 Chat</h2>
+
+<div class="controls">
+<label for="doc-filter">Restrict</label>
+<select id="doc-filter"></select>
+</div>
+
+</div>
+
+<div id="chat-window" class="chat-window" aria-live="polite"></div>
+
+<form id="query-form" class="query-form" action="/query">
+
+<input type="hidden" id="thread-id" name="thread_id" />
+
+<textarea
+name="question"
+id="question-input"
+rows="2"
+placeholder="Ask a regulatory question..."
+required
+></textarea>
+
+<div class="row">
+<button type="submit" class="btn primary">Send</button>
+<div id="query-status" class="inline-msg"></div>
+</div>
+
+</form>
+
+</section>
 
 </main>
 
 <script>
-// Minimal client-side logic to use HTMX for requests but render JSON responses
-function uuid() {
-    if (window.crypto && crypto.randomUUID) return crypto.randomUUID();
-    return 'session-' + Math.random().toString(36).slice(2, 10);
+
+/* ------------------------------ */
+/* Thread ID Generator */
+/* ------------------------------ */
+
+function uuid(){
+    if (window.crypto && crypto.randomUUID)
+        return crypto.randomUUID();
+    return 'session-' + Math.random().toString(36).slice(2,10);
 }
 
-const threadIdEl = document.getElementById('thread-id');
-threadIdEl.value = uuid();
+/* ------------------------------ */
+/* Global Chat State */
+/* ------------------------------ */
+
+let chatHistoryByDoc = {};
+let threadByDoc = {};
+let currentDoc = null;
+
+const threadIdEl = document.getElementById("thread-id");
+
+/* ------------------------------ */
+/* Document Loader */
+/* ------------------------------ */
 
 async function refreshDocuments(){
+
     try{
-        const res = await fetch('/documents');
+
+        const res = await fetch("/documents");
         const docs = await res.json();
-        const list = document.getElementById('documents-list');
-        const sel = document.getElementById('doc-filter');
-        list.innerHTML = '';
-        sel.innerHTML = '';
-        const allOpt = document.createElement('option');
-        allOpt.value = '';
-        allOpt.textContent = 'All documents';
+
+        const list = document.getElementById("documents-list");
+        const sel = document.getElementById("doc-filter");
+
+        list.innerHTML = "";
+        sel.innerHTML = "";
+
+        const allOpt = document.createElement("option");
+        allOpt.value = "";
+        allOpt.textContent = "All documents";
         sel.appendChild(allOpt);
 
-        if (!docs || docs.length === 0) {
-            list.innerHTML = '<p class="muted">No documents</p>';
+        if(!docs || docs.length === 0){
+            list.innerHTML = "<p class='muted'>No documents</p>";
             return;
         }
 
-        const ul = document.createElement('ul');
+        const ul = document.createElement("ul");
+
         for(const d of docs){
-            const li = document.createElement('li');
-            li.innerHTML = `<strong>${escapeHtml(d.title)}</strong> <span class="muted">(${d.id || '—'})</span>`;
-            const del = document.createElement('button');
-            del.textContent = 'Delete';
-            del.className = 'btn small danger';
-            del.style.marginLeft='10px';
+
+            const li = document.createElement("li");
+
+            li.innerHTML =
+            `<strong>${escapeHtml(d.title)}</strong>
+            <span class="muted">(${d.id || "—"})</span>`;
+
+            const del = document.createElement("button");
+
+            del.textContent = "Delete";
+            del.className = "btn small danger";
+            del.style.marginLeft = "10px";
+
             del.onclick = async ()=>{
-                if(!confirm(`Delete '${d.title}'?`)) return;
-                const r = await fetch('/documents/' + encodeURIComponent(d.title), {method:'DELETE'});
+
+                if(!confirm(`Delete '${d.title}'?`))
+                    return;
+
+                const r = await fetch(
+                    "/documents/" + encodeURIComponent(d.title),
+                    {method:"DELETE"}
+                );
+
                 if(r.ok){
                     refreshDocuments();
                     appendSystemMessage(`Deleted '${d.title}'`);
                 }else{
-                    const t = await r.text();
-                    appendSystemMessage('Delete failed: '+t);
+                    appendSystemMessage("Delete failed");
                 }
+
             };
+
             li.appendChild(del);
             ul.appendChild(li);
 
-            // add to select
-            const op = document.createElement('option');
+            const op = document.createElement("option");
             op.value = d.title;
             op.textContent = d.title;
+
             sel.appendChild(op);
+
         }
+
         list.appendChild(ul);
-    }catch(e){
-        document.getElementById('documents-list').innerHTML = '<p class="muted">Error loading documents</p>';
+
     }
+    catch(e){
+        document.getElementById("documents-list")
+        .innerHTML = "<p class='muted'>Error loading documents</p>";
+    }
+
 }
+
+/* ------------------------------ */
+/* Escape HTML */
+/* ------------------------------ */
 
 function escapeHtml(s){
-    return (s+'').replace(/[&<>\\\"]/g, c=>({ '&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;' }[c]));
+return (s+"").replace(/[&<>\\\"]/g,
+c=>({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;"}[c]));
 }
+
+/* ------------------------------ */
+/* Chat Functions */
+/* ------------------------------ */
 
 function appendUserMessage(text){
-    const win = document.getElementById('chat-window');
-    const div = document.createElement('div');
-    div.className = 'chat-msg user';
-    div.innerHTML = `<div class="bubble">${escapeHtml(text)}</div>`;
-    win.appendChild(div);
-    win.scrollTop = win.scrollHeight;
+
+const win = document.getElementById("chat-window");
+
+const div = document.createElement("div");
+div.className = "chat-msg user";
+
+div.innerHTML =
+`<div class="bubble">${escapeHtml(text)}</div>`;
+
+win.appendChild(div);
+win.scrollTop = win.scrollHeight;
+
 }
 
-function appendAssistantMessage(text, citations){
-    const win = document.getElementById('chat-window');
-    const div = document.createElement('div');
-    div.className = 'chat-msg assistant';
-    let html = `<div class="bubble">${escapeHtml(text)}</div>`;
-    if(citations && citations.length){
-        html += '<details class="citations"><summary>📑 Citations</summary><ul>';
-        for(const c of citations){
-            const src = c.source || c['source'] || 'unknown';
-            const docid = c.document_id || c['document_id'] || c.documentId || 'unknown';
-            const chunk = c.chunk_id || c['chunk_id'] || c.chunkId || 'unknown';
-            html += `<li><strong>${escapeHtml(src)}</strong><br/>Document ID: <code>${escapeHtml(docid)}</code><br/>Chunk ID: <code>${escapeHtml(chunk)}</code></li>`;
-        }
-        html += '</ul></details>';
-    }
-    div.innerHTML = html;
-    win.appendChild(div);
-    win.scrollTop = win.scrollHeight;
+function appendAssistantMessage(text,citations){
+
+const win = document.getElementById("chat-window");
+
+const div = document.createElement("div");
+div.className = "chat-msg assistant";
+
+let html =
+`<div class="bubble">${escapeHtml(text)}</div>`;
+
+if(citations && citations.length){
+
+html += "<details class='citations'><summary>📑 Citations</summary><ul>";
+
+for(const c of citations){
+
+const src =
+c.source || c["source"] || "unknown";
+
+const docid =
+c.document_id || c["document_id"] || "unknown";
+
+const chunk =
+c.chunk_id || c["chunk_id"] || "unknown";
+
+html +=
+`<li>
+<strong>${escapeHtml(src)}</strong>
+<br/>
+Document ID:
+<code>${escapeHtml(docid)}</code>
+<br/>
+Chunk ID:
+<code>${escapeHtml(chunk)}</code>
+</li>`;
+
+}
+
+html += "</ul></details>";
+
+}
+
+div.innerHTML = html;
+
+win.appendChild(div);
+win.scrollTop = win.scrollHeight;
+
 }
 
 function appendSystemMessage(text){
-    const win = document.getElementById('chat-window');
-    const div = document.createElement('div');
-    div.className = 'chat-msg system';
-    div.innerHTML = `<div class="bubble muted">${escapeHtml(text)}</div>`;
-    win.appendChild(div);
-    win.scrollTop = win.scrollHeight;
+
+const win = document.getElementById("chat-window");
+
+const div = document.createElement("div");
+div.className = "chat-msg system";
+
+div.innerHTML =
+`<div class="bubble muted">${escapeHtml(text)}</div>`;
+
+win.appendChild(div);
+win.scrollTop = win.scrollHeight;
+
 }
 
-document.getElementById('ingest-form').addEventListener('submit', function(ev){
-    ev.preventDefault();
-    const form = ev.currentTarget;
-    const fd = new FormData(form);
-    document.getElementById('ingest-result').textContent = 'Uploading...';
-    fetch(form.action, {method:'POST', body:fd}).then(async r=>{
-        const data = await r.json().catch(()=>null);
-        if(data && data.message){
-            document.getElementById('ingest-result').textContent = data.message;
-            refreshDocuments();
-        }else{
-            document.getElementById('ingest-result').textContent = 'Ingest completed';
-            refreshDocuments();
-        }
-    }).catch(e=>{
-        document.getElementById('ingest-result').textContent = 'Upload failed';
-    });
+/* ------------------------------ */
+/* Save / Restore Chats */
+/* ------------------------------ */
+
+function saveCurrentChat(){
+
+if(!currentDoc) return;
+
+const win = document.getElementById("chat-window");
+
+chatHistoryByDoc[currentDoc] = win.innerHTML;
+
+}
+
+function restoreChat(doc){
+
+const win = document.getElementById("chat-window");
+
+if(chatHistoryByDoc[doc]){
+
+win.innerHTML = chatHistoryByDoc[doc];
+
+}else{
+
+win.innerHTML = "";
+
+}
+
+}
+
+/* ------------------------------ */
+/* Document Change */
+/* ------------------------------ */
+
+document
+.getElementById("doc-filter")
+.addEventListener("change",function(){
+
+const newDoc = this.value;
+
+saveCurrentChat();
+
+currentDoc = newDoc;
+
+restoreChat(newDoc);
+
+if(!threadByDoc[newDoc])
+threadByDoc[newDoc] = uuid();
+
+threadIdEl.value = threadByDoc[newDoc];
+
 });
 
-document.getElementById('query-form').addEventListener('submit', function(ev){
-    ev.preventDefault();
+/* ------------------------------ */
+/* Ingest */
+/* ------------------------------ */
 
-    const form = ev.currentTarget;
-    const q = document.getElementById('question-input').value;
-    const thread = document.getElementById('thread-id').value;
-    const filterSel = document.getElementById('doc-filter');
-    const selected = filterSel.value;
-    if(!selected){
-        appendSystemMessage("Please select a document before asking a question.");
-        return;
-    }
+document
+.getElementById("ingest-form")
+.addEventListener("submit",function(ev){
 
-    const payload = { question: q, thread_id: thread };
+ev.preventDefault();
 
-    payload.filters = { title: selected };
+const form = ev.currentTarget;
+const fd = new FormData(form);
 
-    appendUserMessage(q);
-    document.getElementById('query-status').textContent = 'Thinking...';
+document.getElementById("ingest-result")
+.textContent = "Uploading...";
 
-    fetch(form.action, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(payload)
-    }).then(async r=>{
-        const data = await r.json();
-        document.getElementById('query-status').textContent = '';
-        appendAssistantMessage(data.answer || '(no answer)', data.citations || []);
-    }).catch(e=>{
-        document.getElementById('query-status').textContent = 'Error';
-        appendSystemMessage('Query failed');
-    }).finally(()=>{
-        document.getElementById('question-input').value = '';
-    });
+fetch(form.action,{
+method:"POST",
+body:fd
+})
+.then(async r=>{
+
+const data =
+await r.json().catch(()=>null);
+
+if(data && data.message){
+
+document.getElementById("ingest-result")
+.textContent = data.message;
+
+refreshDocuments();
+
+}else{
+
+document.getElementById("ingest-result")
+.textContent = "Ingest completed";
+
+refreshDocuments();
+
+}
+
+})
+.catch(()=>{
+
+document.getElementById("ingest-result")
+.textContent = "Upload failed";
+
 });
 
-// init
+});
+
+/* ------------------------------ */
+/* Query */
+/* ------------------------------ */
+
+document
+.getElementById("query-form")
+.addEventListener("submit",function(ev){
+
+ev.preventDefault();
+
+const q =
+document.getElementById("question-input").value;
+
+const filterSel =
+document.getElementById("doc-filter");
+
+const selected = filterSel.value;
+
+if(!selected){
+
+appendSystemMessage(
+"Please select a document before asking a question."
+);
+
+return;
+
+}
+
+const payload = {
+question:q,
+thread_id:threadIdEl.value,
+filters:{title:selected}
+};
+
+appendUserMessage(q);
+
+document.getElementById("query-status")
+.textContent = "Thinking...";
+
+fetch("/query",{
+
+method:"POST",
+
+headers:{
+"Content-Type":"application/json"
+},
+
+body:JSON.stringify(payload)
+
+})
+.then(async r=>{
+
+const data = await r.json();
+
+document.getElementById("query-status")
+.textContent = "";
+
+appendAssistantMessage(
+data.answer || "(no answer)",
+data.citations || []
+);
+
+})
+.catch(()=>{
+
+document.getElementById("query-status")
+.textContent = "Error";
+
+appendSystemMessage("Query failed");
+
+})
+.finally(()=>{
+
+document.getElementById("question-input").value = "";
+
+});
+
+});
+
+/* ------------------------------ */
+/* Init */
+/* ------------------------------ */
+
 refreshDocuments();
 
 </script>
