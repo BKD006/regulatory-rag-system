@@ -6,7 +6,6 @@ from logger.custom_logger import CustomLogger
 from exception.custom_exception import RegulatoryRAGException
 from langchain_groq import ChatGroq
 from langchain_aws import BedrockEmbeddings
-from utils.observability import langfuse_callback
 #Initialize the logger
 log= CustomLogger().get_logger(__name__)
 
@@ -61,7 +60,6 @@ class ModelLoader:
                 model=model_name,
                 api_key=self.api_keys.get("GROQ_API_KEY"),
                 temperature=temperature,
-                callbacks=[langfuse_callback]
             )
         else:
             log.error("Unsupported LLM provider", provider=provider)
