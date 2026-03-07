@@ -19,7 +19,7 @@
     <section class="panel">
         <h2>📂 Ingest Document</h2>
 
-        <form id="ingest-form" action="/ingest" hx-post="/ingest" hx-encoding="multipart/form-data" hx-swap="none">
+        <form id="ingest-form" action="/ingest">
             <input type="file" name="file" required />
             <div class="row">
                 <button type="submit" class="btn">Ingest</button>
@@ -45,7 +45,7 @@
 
         <div id="chat-window" class="chat-window" aria-live="polite"></div>
 
-        <form id="query-form" class="query-form" action="/query" hx-post="/query" hx-swap="none">
+        <form id="query-form" class="query-form" action="/query">
             <input type="hidden" id="thread-id" name="thread_id" />
             <textarea name="question" id="question-input" rows="2" placeholder="Ask a regulatory question..." required></textarea>
             <div class="row">
@@ -182,13 +182,20 @@ document.getElementById('ingest-form').addEventListener('submit', function(ev){
 
 document.getElementById('query-form').addEventListener('submit', function(ev){
     ev.preventDefault();
+
     const form = ev.currentTarget;
     const q = document.getElementById('question-input').value;
     const thread = document.getElementById('thread-id').value;
     const filterSel = document.getElementById('doc-filter');
     const selected = filterSel.value;
+    if(!selected){
+        appendSystemMessage("Please select a document before asking a question.");
+        return;
+    }
+
     const payload = { question: q, thread_id: thread };
-    if(selected) payload.filters = { title: selected };
+
+    payload.filters = { title: selected };
 
     appendUserMessage(q);
     document.getElementById('query-status').textContent = 'Thinking...';
