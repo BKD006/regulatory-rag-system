@@ -58,17 +58,3 @@ ON chunks (document_id);
 
 CREATE INDEX IF NOT EXISTS idx_chunks_chunk_index
 ON chunks (chunk_index);
-
--- =========================================================
--- Cache table for question-answer pairs
--- =========================================================
-
-CREATE TABLE IF NOT EXISTS public.query_cache (
-    cache_key TEXT PRIMARY KEY,
-    question TEXT NOT NULL,
-    response JSONB NOT NULL,
-    created_at TIMESTAMP DEFAULT now()
-);
-
-CREATE INDEX IF NOT EXISTS idx_query_cache_created_at
-ON public.query_cache(created_at);
