@@ -25,7 +25,6 @@ class RAGPipeline:
     def __init__(self):
         self.cache = LLMAnswerCacheManager(memory_maxsize=1000,
                                            memory_ttl_seconds=300,     # 5 min L1
-                                           postgres_ttl_minutes=60     # 1 hour L2
                                            )
         self.retriever = HybridRetriever()
         self.reranker = CrossEncoderReranker(top_k=6)
@@ -308,7 +307,6 @@ class RAGPipeline:
             if response["answer"] and not response["answer"].startswith("The question cannot be answered safely"):
                 await self.cache.set(
                     cache_key,
-                    query,
                     response,
                 )
 
