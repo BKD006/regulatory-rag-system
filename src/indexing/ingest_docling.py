@@ -17,7 +17,7 @@ from typing import List, Dict, Any, Optional
 from datetime import datetime
 from dotenv import load_dotenv
 import asyncpg
-from src.chunking.chunker import create_chunker
+from src.chunking.chunker_docling import create_chunker
 from src.embeddings.embedder import create_embedder
 from src.indexing.cleaning import DocumentCleaner
 from utils.db_utils import (
@@ -29,7 +29,7 @@ from utils.db_utils import (
 )
 from utils import db_utils
 from utils.models import IngestionConfig, IngestionResult, DocumentChunk, ChunkingConfig
-from docling.document_converter import DocumentConverter
+from src.parsing.docling_parser import DoclingDocumentParser
 from logger import GLOBAL_LOGGER as log
 from exception.custom_exception import RegulatoryRAGException
 
@@ -56,7 +56,7 @@ class DocumentIngestionPipeline:
         )
         self.chunker = create_chunker(self.chunker_config)
         self.embedder = create_embedder()
-        self.converter = DocumentConverter()
+        self.parser = DoclingDocumentParser()
 
         self._initialized = False
 
@@ -156,7 +156,7 @@ class DocumentIngestionPipeline:
         start_time = datetime.now()
 
         try:
-            content, docling_doc = self._read_document(file_path)
+            content, docling_doc = self.parser.parse(file_path)
             
             #Apply cleaning steps
             if docling_doc is not None:
