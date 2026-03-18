@@ -16,10 +16,9 @@ from pathlib import Path
 from typing import List, Dict, Any, Optional
 from datetime import datetime
 from dotenv import load_dotenv
-import asyncpg
 from src.chunking.chunker_docling import create_chunker
 from src.embeddings.embedder import create_embedder
-from src.indexing.cleaning import DocumentCleaner
+from src.ingestion.cleaning import DocumentCleaner
 from utils.db_utils import (
     initialize_database,
     close_database,
