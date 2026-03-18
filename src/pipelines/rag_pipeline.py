@@ -6,6 +6,7 @@ Retrieval → Reranking → Guardrails → Answer Generation
 from typing import Dict, Any, Optional, List
 from langgraph.graph import StateGraph, START
 from src.retrieval.hybrid_retriever_v2 import HybridRetriever
+from src.memory.conversation_store import ConversationStore
 from src.generation.answer_generation import AnswerGenerator
 from src.reranking.reranker import CrossEncoderReranker
 from src.guardrails.guardrails import AnswerGuardrails, GuardrailViolation
@@ -26,6 +27,7 @@ class RAGPipeline:
         self.cache = LLMAnswerCacheManager(memory_maxsize=1000,
                                            memory_ttl_seconds=300,     # 5 min L1
                                            )
+        self.conversation_store = ConversationStore()
         self.retriever = HybridRetriever()
         self.reranker = CrossEncoderReranker(top_k=6)
         self.answer_generator = AnswerGenerator()
@@ -254,7 +256,7 @@ class RAGPipeline:
             # -------------------------------------------------
             # 1. Generate deterministic cache key
             # -------------------------------------------------
-            cache_key = await self.cache.make_key(
+            cache_key = self.cache.make_key(
                 question=query,
                 namespace=f"rag:{filters}"
             )
@@ -275,7 +277,6 @@ class RAGPipeline:
                 return cached
 
             log.info("rag_cache_miss")
-
             # -------------------------------------------------
             # 3. Run Graph (cold path)
             # -------------------------------------------------
@@ -300,6 +301,23 @@ class RAGPipeline:
                 "answer": final_state.get("answer"),
                 "citations": safe_citations,
             }
+
+            # Save assistant response to conversation storage
+            if response["answer"] and not response["answer"].startswith("The question cannot be answered safely"):
+                try:
+                    await self.conversation_store.save_qa(
+                        query=query,
+                        answer=response["answer"],
+                        citations=response["citations"],
+                        metadata={
+                                "filters": filters,
+                                "citation_count": len(response["citations"]),
+                                "query_length": len(query),
+                                "has_cache": cached is not None,
+                            }
+                    )
+                except Exception as e:
+                    log.error("conversation_store_save_failed", error=str(e))
 
             # -------------------------------------------------
             # 4. Store Only Valid Answers
