@@ -24,7 +24,7 @@ class CrossEncoderReranker:
         self,
         model_name: str = "cross-encoder/ms-marco-MiniLM-L-6-v2",
         top_k: int = 6,
-        min_score: float = 0.05,
+        min_score: float = 0,
         device: str = "cpu",
     ):
         self.model_name = model_name
