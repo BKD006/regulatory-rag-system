@@ -58,7 +58,9 @@ class AnswerGenerator:
         # --------------------------------------------------
         # HARD safety: enforce single document at runtime
         # --------------------------------------------------
+
         sources = {c.source for c in retrieved_chunks}
+
         if len(sources) != 1:
             log.warning(
                 "multiple_sources_detected_in_answer_generation",
@@ -75,6 +77,34 @@ class AnswerGenerator:
 
         document_title = next(iter(sources))
 
+        # --------------------------------------------------
+        # TOKEN SAFE LIMITER
+        # --------------------------------------------------
+
+        MAX_CHARS = 8000  # safe for groq 6000 TPM
+        total_chars = 0
+        limited_chunks = []
+
+        for c in retrieved_chunks:
+
+            total_chars += len(c.content)
+
+            if total_chars > MAX_CHARS:
+                break
+
+            limited_chunks.append(c)
+
+        if not limited_chunks:
+            limited_chunks = retrieved_chunks[:2]
+
+        retrieved_chunks = limited_chunks
+
+        log.info(
+            "context_limited",
+            chunk_count=len(retrieved_chunks),
+            total_chars=total_chars,
+        )
+
         log.info(
             "answer_generation_started",
             document=document_title,
@@ -84,8 +114,11 @@ class AnswerGenerator:
         # --------------------------------------------------
         # Build strictly controlled source blocks
         # --------------------------------------------------
+
         source_blocks = []
+
         for idx, chunk in enumerate(retrieved_chunks, start=1):
+
             source_blocks.append(
                 f"[{idx}] ({document_title})\n{chunk.content}"
             )
@@ -93,16 +126,18 @@ class AnswerGenerator:
         sources_text = "\n\n".join(source_blocks)
 
         # --------------------------------------------------
-        # User prompt (STRICT)
+        # User prompt
         # --------------------------------------------------
+
         user_prompt = ANSWER_USER_PROMPT_TEMPLATE.format(
             question=question,
             sources=sources_text,
         )
 
         # --------------------------------------------------
-        # System prompt (HARD instructions)
+        # System prompt
         # --------------------------------------------------
+
         system_prompt = (
             ANSWER_SYSTEM_PROMPT
             + "\n\n"
@@ -113,7 +148,7 @@ class AnswerGenerator:
                 - If the answer is not present, say so clearly
                 - Do NOT guess or infer beyond the provided text
                 """
-        )
+                    )
 
         messages = [
             SystemMessage(content=system_prompt),
@@ -123,7 +158,9 @@ class AnswerGenerator:
         # --------------------------------------------------
         # LLM call
         # --------------------------------------------------
+
         response = await self.llm.ainvoke(messages)
+
         answer_text = response.content.strip()
 
         log.info(
