@@ -8,6 +8,7 @@ Unified async DB utilities.
 
 import os
 import asyncpg
+import ssl
 from typing import Optional, List, Dict
 from dotenv import load_dotenv
 from logger import GLOBAL_LOGGER as log
@@ -25,25 +26,39 @@ db_pool: Optional[asyncpg.Pool] = None  # backward compatibility
 # ------------------------------------------------------------------
 # Pool lifecycle
 # ------------------------------------------------------------------
-
 async def init_db_pool():
     global _pool, db_pool
 
     if _pool is not None:
         return
 
+    ssl_context = ssl.create_default_context()
+    ssl_context.check_hostname = False
+    ssl_context.verify_mode = ssl.CERT_NONE
+
     try:
         _pool = await asyncpg.create_pool(
             DATABASE_URL,
+            ssl=ssl_context,
             min_size=1,
             max_size=10,
-            statement_cache_size=0
+            statement_cache_size=0,
+            timeout=30
         )
+
         db_pool = _pool
-        log.info("db_pool_initialized", min_size=1, max_size=10)
+
+        log.info(
+            "db_pool_initialized",
+            min_size=1,
+            max_size=10,
+        )
 
     except Exception as e:
-        log.error("db_pool_initialization_failed", error=str(e))
+        log.error(
+            "db_pool_initialization_failed",
+            error=str(e),
+        )
         raise RegulatoryRAGException(e)
 
 
