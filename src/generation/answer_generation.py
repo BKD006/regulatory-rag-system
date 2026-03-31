@@ -1,13 +1,4 @@
-"""
-Answer Generation with Citations for Hybrid RAG.
-
-- Consumes GUARDED chunks only
-- Produces a grounded answer
-- Enforces single-document usage
-- Attaches citations safely
-"""
-
-from typing import List
+from typing import List, Optional, Dict
 from langchain_core.messages import SystemMessage, HumanMessage
 from utils.models import RetrievedChunk, AnswerResult
 from src.prompts.prompt_library import (
@@ -17,15 +8,12 @@ from src.prompts.prompt_library import (
 from utils.model_loader import ModelLoader
 from logger import GLOBAL_LOGGER as log
 
+
 # ------------------------------------------------------------------
 # Answer Generator
 # ------------------------------------------------------------------
 
 class AnswerGenerator:
-    """
-    Generates a grounded answer from a SINGLE document
-    using pre-validated chunks.
-    """
 
     def __init__(self):
         self.llm = ModelLoader().load_llm()
@@ -39,11 +27,13 @@ class AnswerGenerator:
         self,
         question: str,
         retrieved_chunks: List[RetrievedChunk],
+        chat_history: Optional[List[Dict]] = None,
+        previous_answer: Optional[str] = None
     ) -> AnswerResult:
-        """
-        retrieved_chunks MUST already be guardrail-validated.
-        """
-
+        
+        # --------------------------------------------------
+        # Handle empty retrieval case
+        # --------------------------------------------------
         if not retrieved_chunks:
             log.warning("answer_generation_no_chunks")
 
@@ -56,9 +46,8 @@ class AnswerGenerator:
             )
 
         # --------------------------------------------------
-        # HARD safety: enforce single document at runtime
+        # HARD safety: enforce single document constraint
         # --------------------------------------------------
-
         sources = {c.source for c in retrieved_chunks}
 
         if len(sources) != 1:
@@ -78,15 +67,15 @@ class AnswerGenerator:
         document_title = next(iter(sources))
 
         # --------------------------------------------------
-        # TOKEN SAFE LIMITER
+        # TOKEN-SAFE CONTEXT LIMITER
         # --------------------------------------------------
+        # Prevents exceeding LLM token limits (approx via char count)
 
-        MAX_CHARS = 8000  # safe for groq 6000 TPM
+        MAX_CHARS = 8000  # Safe threshold for Groq / similar models
         total_chars = 0
         limited_chunks = []
 
         for c in retrieved_chunks:
-
             total_chars += len(c.content)
 
             if total_chars > MAX_CHARS:
@@ -94,6 +83,7 @@ class AnswerGenerator:
 
             limited_chunks.append(c)
 
+        # Ensure minimum context is preserved
         if not limited_chunks:
             limited_chunks = retrieved_chunks[:2]
 
@@ -112,32 +102,40 @@ class AnswerGenerator:
         )
 
         # --------------------------------------------------
-        # Build strictly controlled source blocks
+        # Build structured source blocks
         # --------------------------------------------------
+        # Format:
+        # [1] (Document Title)
+        # chunk content
 
         source_blocks = []
 
         for idx, chunk in enumerate(retrieved_chunks, start=1):
-
             source_blocks.append(
                 f"[{idx}] ({document_title})\n{chunk.content}"
             )
 
         sources_text = "\n\n".join(source_blocks)
+        history_block = ""
+        if chat_history:
+            history_block = "\n\nConversation History:\n" + "\n".join(
+                f"{h['role']}: {h['content']}" for h in chat_history
+            )
+        previous_answer_block = ""
+        if previous_answer:
+            previous_answer_block = f"\n\nPrevious Answer:\n{previous_answer}"
 
         # --------------------------------------------------
-        # User prompt
+        # Construct user prompt
         # --------------------------------------------------
-
         user_prompt = ANSWER_USER_PROMPT_TEMPLATE.format(
             question=question,
             sources=sources_text,
-        )
+        )+ history_block+previous_answer_block
 
         # --------------------------------------------------
-        # System prompt
+        # Construct system prompt with strict rules
         # --------------------------------------------------
-
         system_prompt = (
             ANSWER_SYSTEM_PROMPT
             + "\n\n"
@@ -148,17 +146,17 @@ class AnswerGenerator:
                 - If the answer is not present, say so clearly
                 - Do NOT guess or infer beyond the provided text
                 """
-                    )
+        )
 
+        # Prepare LLM messages
         messages = [
             SystemMessage(content=system_prompt),
             HumanMessage(content=user_prompt),
         ]
 
         # --------------------------------------------------
-        # LLM call
+        # LLM invocation
         # --------------------------------------------------
-
         response = await self.llm.ainvoke(messages)
 
         answer_text = response.content.strip()

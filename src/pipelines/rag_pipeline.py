@@ -1,8 +1,3 @@
-"""
-End-to-end RAG LangGraph:
-Retrieval → Reranking → Guardrails → Answer Generation
-"""
-
 from typing import Dict, Any, Optional, List
 from langgraph.graph import StateGraph, START
 from src.retrieval.hybrid_retriever_v2 import HybridRetriever
@@ -19,11 +14,9 @@ from src.cache.cache_manager import LLMAnswerCacheManager
 from langsmith import traceable, get_current_run_tree
 
 class RAGPipeline:
-    """
-    End-to-end RAG pipeline with HARD guardrails.
-    """
-
+    
     def __init__(self):
+
         self.cache = LLMAnswerCacheManager(memory_maxsize=1000,
                                            memory_ttl_seconds=300,     # 5 min L1
                                            )
@@ -42,17 +35,24 @@ class RAGPipeline:
     @traceable(name="Retrieval")
     async def retrieval_node(self, state: RAGState) -> Dict[str, Any]:
         try:
+            query = state.rewritten_query or state.user_query
             chunks = await self.retriever.retrieve(
-                query=state.user_query,
+                query=query,
                 filters=state.filters,
             )
+            # Conversational fallback (handles weak + empty retrieval)
+            if len(chunks) < 2 and state.previous_chunks:
+                if state.chat_history:  # ensure it's a follow-up
+                    log.warning("weak_retrieval_fallback_to_previous_chunks")
+                    chunks = state.previous_chunks
 
             log.info(
                 "retrieval_node_completed",
                 chunk_count=len(chunks),
             )
 
-            return {"retrieved_chunks": chunks}
+            return {"retrieved_chunks": chunks,
+                    "previous_chunks": chunks}
 
         except Exception as e:
             log.error("retrieval_node_failed", error=str(e))
@@ -75,22 +75,55 @@ class RAGPipeline:
 
         return {"reranked_chunks": reranked}
 
-    async def guardrail_node(self, state: RAGState) -> Dict[str, Any]:
-        """
-        HARD enforcement BEFORE LLM:
-        - Single document only
-        - Minimum evidence
-        """
+    async def rewrite_node(self, state: RAGState) -> Dict[str, Any]:
+        history = state.chat_history
+        query = state.user_query
 
+        if not history:
+            return {"rewritten_query": query}
+
+        history_text = "\n".join(
+            f"{h['role']}: {h['content']}" for h in history
+        )
+
+        prompt = f"""
+                    You are a query rewriting system for a retrieval engine.
+
+                    Convert the follow-up question into a COMPLETE standalone query.
+
+                    STRICT RULES:
+                    - Resolve all references like "it", "this", "that"
+                    - Include domain-specific terms from conversation
+                    - Expand vague queries into detailed searchable queries
+                    - DO NOT return short queries
+
+                    Conversation:
+                    {history_text}
+
+                    Follow-up:
+                    {query}
+
+                    Standalone Query:
+                """
+        rewritten = await self.answer_generator.llm.ainvoke(prompt)
+        return {"rewritten_query": rewritten.content.strip()}
+
+    async def guardrail_node(self, state: RAGState) -> Dict[str, Any]:
         chunks: List[RetrievedChunk] = (
             state.reranked_chunks or state.retrieved_chunks or []
         )
 
         try:
+            min_required_chunks = 2
+
+            # Relax rule for conversational follow-ups
+            if state.chat_history:
+                min_required_chunks = 1
+
             guarded_chunks = self.guardrails.apply_retrieval_guardrails(
                 chunks=chunks,
                 filters=state.filters,
-                min_chunks=2,
+                min_chunks=min_required_chunks,
             )
 
             log.info(
@@ -129,12 +162,29 @@ class RAGPipeline:
             }
 
         try:
+            # Extract previous answer
+            def strip_citations(text: str) -> str:
+                return re.sub(r"\[\d+\]", "", text)
+
+            previous_answer = ""
+            if state.chat_history:
+                previous_answer = strip_citations(
+                    state.chat_history[-1]["content"]
+                )
+            cleaned_history = []
+            for h in state.chat_history:
+                cleaned_history.append({
+                    "role": h["role"],
+                    "content": strip_citations(h["content"])
+                })
             # ---------------------------------------------
             # Generate Answer
             # ---------------------------------------------
             result = await self.answer_generator.generate(
                 question=state.user_query,
                 retrieved_chunks=chunks,
+                chat_history=cleaned_history,
+                previous_answer=previous_answer
             )
 
             answer_text = result.answer
@@ -225,12 +275,14 @@ class RAGPipeline:
     def _build_graph(self):
         graph = StateGraph(RAGState)
 
+        graph.add_node("rewrite", self.rewrite_node)
         graph.add_node("retrieve", self.retrieval_node)
         graph.add_node("rerank", self.rerank_node)
         graph.add_node("guardrails", self.guardrail_node)
         graph.add_node("answer", self.answer_node)
 
-        graph.add_edge(START, "retrieve")
+        graph.add_edge(START, "rewrite")
+        graph.add_edge("rewrite", "retrieve")
         graph.add_edge("retrieve", "rerank")
         graph.add_edge("rerank", "guardrails")
         graph.add_edge("guardrails", "answer")
@@ -246,19 +298,19 @@ class RAGPipeline:
         query: str,
         filters: Optional[Dict[str, Any]] = None,
     ) -> Dict[str, Any]:
-
         log.info(
             "rag_run_started",
             has_filters=bool(filters),
         )
 
         try:
+            session_id = f"doc:{(filters or {}).get('title', 'default')}"
             # -------------------------------------------------
             # 1. Generate deterministic cache key
             # -------------------------------------------------
             cache_key = self.cache.make_key(
                 question=query,
-                namespace=f"rag:{filters}"
+                namespace=f"rag:{session_id}",
             )
 
             # -------------------------------------------------
@@ -278,12 +330,20 @@ class RAGPipeline:
 
             log.info("rag_cache_miss")
             # -------------------------------------------------
-            # 3. Run Graph (cold path)
+            # 3. Fetch conversation history (LAST 4 TURNS)
+            # -------------------------------------------------
+            chat_history = await self.conversation_store.get_recent_history(
+                session_id=session_id,
+                limit=4
+                )
+            # -------------------------------------------------
+            # 4. Run Graph (cold path)
             # -------------------------------------------------
             final_state = await self.graph.ainvoke(
                 RAGState(
                     user_query=query,
                     filters=filters or {},
+                    chat_history=chat_history
                 )
             )
 
@@ -311,6 +371,7 @@ class RAGPipeline:
                         citations=response["citations"],
                         metadata={
                                 "filters": filters,
+                                "session_id": session_id,
                                 "citation_count": len(response["citations"]),
                                 "query_length": len(query),
                                 "has_cache": cached is not None,

@@ -98,6 +98,11 @@ class RAGState(BaseModel):
     answer: Optional[str] = None
     citations: List[RetrievedChunk] = Field(default_factory=list)
 
+    # For conversational context
+    chat_history: List[Dict[str, str]] = Field(default_factory=list)
+    rewritten_query: Optional[str] = None
+    previous_chunks: List[RetrievedChunk] = []
+    
 class QueryRequest(BaseModel):
     question: str
     thread_id: Optional[str] = None
