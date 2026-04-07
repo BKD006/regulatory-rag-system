@@ -1,11 +1,3 @@
-"""
-Unified async DB utilities.
-
-- Owns DB pool lifecycle
-- Exposes document-level helpers
-- NO query-level logging
-"""
-
 import os
 import asyncpg
 import ssl
@@ -23,10 +15,13 @@ if not DATABASE_URL:
 _pool: Optional[asyncpg.Pool] = None
 db_pool: Optional[asyncpg.Pool] = None  # backward compatibility
 
+
 # ------------------------------------------------------------------
 # Pool lifecycle
 # ------------------------------------------------------------------
+
 async def init_db_pool():
+    """Initializes the async PostgreSQL connection pool."""
     global _pool, db_pool
 
     if _pool is not None:
@@ -63,6 +58,7 @@ async def init_db_pool():
 
 
 async def close_db_pool():
+    """Closes the async PostgreSQL connection pool."""
     global _pool, db_pool
 
     if _pool is None:
@@ -79,27 +75,21 @@ async def close_db_pool():
         raise RegulatoryRAGException(e)
 
 
-# backward-compatible aliases
-async def initialize_database():
-    await init_db_pool()
-
-
-async def close_database():
-    await close_db_pool()
-
-
 def get_pool() -> asyncpg.Pool:
+    """Returns the active database connection pool."""
     if _pool is None:
         raise RegulatoryRAGException(
             "DB pool not initialized. Call init_db_pool() first."
         )
     return _pool
 
+
 # ------------------------------------------------------------------
 # Document helpers
 # ------------------------------------------------------------------
 
 async def get_document_by_hash(file_hash: str):
+    """Fetches a document by its content hash."""
     pool = get_pool()
     async with pool.acquire() as conn:
         return await conn.fetchrow(
@@ -113,6 +103,7 @@ async def get_document_by_hash(file_hash: str):
 
 
 async def get_document_by_source(source: str):
+    """Fetches a document by its source path."""
     pool = get_pool()
     async with pool.acquire() as conn:
         return await conn.fetchrow(
@@ -126,6 +117,7 @@ async def get_document_by_source(source: str):
 
 
 async def delete_document_and_chunks(document_id: str):
+    """Deletes a document and its associated chunks."""
     pool = get_pool()
     async with pool.acquire() as conn:
         async with conn.transaction():
@@ -152,6 +144,7 @@ async def delete_document_and_chunks(document_id: str):
 
 
 async def list_documents() -> List[Dict[str, str]]:
+    """Lists all stored documents with IDs and titles."""
     pool = get_pool()
     async with pool.acquire() as conn:
         rows = await conn.fetch(
@@ -165,6 +158,7 @@ async def list_documents() -> List[Dict[str, str]]:
 
 
 async def list_document_titles() -> List[str]:
+    """Retrieves distinct document titles."""
     pool = get_pool()
     async with pool.acquire() as conn:
         rows = await conn.fetch(
@@ -178,6 +172,7 @@ async def list_document_titles() -> List[str]:
 
 
 async def delete_document_by_title(title: str):
+    """Deletes a document by its title."""
     pool = get_pool()
     async with pool.acquire() as conn:
         async with conn.transaction():
@@ -215,7 +210,9 @@ async def delete_document_by_title(title: str):
                 )
                 raise RegulatoryRAGException(e)
 
+
 async def get_chunk_by_id(chunk_id: str):
+    """Fetches a document chunk by its ID."""
     pool = get_pool()
     async with pool.acquire() as conn:
         row = await conn.fetchrow(
