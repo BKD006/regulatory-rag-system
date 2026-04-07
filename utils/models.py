@@ -1,10 +1,4 @@
-"""
-Pydantic models used across the ingestion pipeline.
-"""
-
 from typing import Optional, List, Dict, Any
-from datetime import datetime
-
 from pydantic import BaseModel, Field, model_validator
 
 
@@ -13,9 +7,7 @@ from pydantic import BaseModel, Field, model_validator
 # ------------------------------------------------------------------
 
 class IngestionConfig(BaseModel):
-    """
-    Configuration used by the ingestion pipeline.
-    """
+    """Defines ingestion configuration parameters."""
     chunk_size: int = 1000
     chunk_overlap: int = 200
     max_chunk_size: int = 2000
@@ -27,20 +19,20 @@ class IngestionConfig(BaseModel):
 # ------------------------------------------------------------------
 
 class IngestionResult(BaseModel):
-    """
-    Result returned after ingesting a single document.
-    """
+    """Represents the result of a document ingestion process."""
     document_id: str
     title: str
     chunks_created: int
     processing_time_ms: float
     errors: List[str] = Field(default_factory=list)
 
+
 # ------------------------------------------------------------------
 # Retriever models
 # ------------------------------------------------------------------
 
 class RetrievedChunk(BaseModel):
+    """Represents a retrieved document chunk with metadata and score."""
     chunk_id: str
     document_id: str
     content: str
@@ -50,70 +42,64 @@ class RetrievedChunk(BaseModel):
 
 
 class RetrievalState(BaseModel):
-    # input
+    """Holds intermediate retrieval state for hybrid retrieval pipeline."""
     user_query: str
     filters: Dict[str, Any] = Field(default_factory=dict)
-    # retrieval
     bm25_results: List[RetrievedChunk] = Field(default_factory=list)
     vector_results: List[RetrievedChunk] = Field(default_factory=list)
     fused_results: List[RetrievedChunk] = Field(default_factory=list)
-    
+
+
 # ------------------------------------------------------------------
 # Output models
 # ------------------------------------------------------------------
 
 class Citation(BaseModel):
-    """
-    Clean citation returned to the user.
-    """
+    """Represents a user-facing citation reference."""
     id: int
     source: str
     document_id: str
     chunk_id: str
 
+
 class AnswerResult(BaseModel):
+    """Represents generated answer with supporting citations."""
     answer: str
     citations: List[RetrievedChunk]
+
 
 # ------------------------------------------------------------------
 # RAG State model
 # ------------------------------------------------------------------
-class RAGState(BaseModel):
-    """
-    State object used across the LangGraph RAG pipeline.
-    """
 
-    # Input
+class RAGState(BaseModel):
+    """Maintains state across the RAG pipeline execution."""
     user_query: str
     filters: Dict[str, Any] = Field(default_factory=dict)
 
-    # Retrieval
     retrieved_chunks: List[RetrievedChunk] = Field(default_factory=list)
     reranked_chunks: List[RetrievedChunk] = Field(default_factory=list)
 
-    #Guardrails stage
-    guarded_chunks: Optional[List[RetrievedChunk]] = Field(default_factory=list)
-    
-    # Output
+    #Currently unused in pipeline execution
+    # guarded_chunks: Optional[List[RetrievedChunk]] = Field(default_factory=list)
+
     answer: Optional[str] = None
     citations: List[RetrievedChunk] = Field(default_factory=list)
 
-    # For conversational context
     chat_history: List[Dict[str, str]] = Field(default_factory=list)
     rewritten_query: Optional[str] = None
-    previous_chunks: List[RetrievedChunk] = []
-    
+    previous_chunks: List[RetrievedChunk] = Field(default_factory=list)
+
+
 class QueryRequest(BaseModel):
+    """Represents incoming query request payload."""
     question: str
     thread_id: Optional[str] = None
     filters: Optional[Dict[str, Any]] = None
 
 
 class ChunkingConfig(BaseModel):
-    """
-    Configuration for chunking.
-    """
-
+    """Defines configuration for document chunking."""
     chunk_size: int = Field(default=1000, gt=0)
     chunk_overlap: int = Field(default=200, ge=0)
     max_chunk_size: int = Field(default=2000, gt=0)
@@ -129,12 +115,10 @@ class ChunkingConfig(BaseModel):
         if self.min_chunk_size > self.chunk_size:
             raise ValueError("min_chunk_size cannot exceed chunk_size")
         return self
-    
-class DocumentChunk(BaseModel):
-    """
-    Represents a document chunk with optional embedding.
-    """
 
+
+class DocumentChunk(BaseModel):
+    """Represents a chunk of document with optional embedding."""
     content: str
     index: int
     start_char: int
@@ -146,7 +130,5 @@ class DocumentChunk(BaseModel):
     @model_validator(mode="after")
     def compute_token_count(self):
         if self.token_count is None:
-            # Rough heuristic: ~4 chars per token
             self.token_count = max(1, len(self.content) // 4)
         return self
-
