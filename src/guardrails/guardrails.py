@@ -1,101 +1,22 @@
-"""
-Deterministic HARD guardrails for Regulatory RAG.
-
-These guardrails:
-- Run before or after LLM deterministically
-- Do NOT depend on model behavior
-- Can STOP the pipeline safely
-"""
-
-from typing import List, Dict, Any, Optional
+from typing import List, Optional
 from utils.models import RetrievedChunk
+from exception.custom_exception import RegulatoryRAGException
+from logger import GLOBAL_LOGGER as log
 
-
-# ==========================================================
-# Exception
-# ==========================================================
-
-class GuardrailViolation(Exception):
-    """
-    Raised when a HARD guardrail is violated.
-    Should be caught at pipeline level.
-    """
-    pass
-
-
-# ==========================================================
-# Guardrails
-# ==========================================================
 
 class AnswerGuardrails:
     """
-    Deterministic guardrails for RAG pipeline.
+    Provides post-generation validation checks to ensure answer quality and grounding.
 
-    Phases:
-    1. Retrieval-time
-    2. Generation-time (pre-LLM)
-    3. Post-generation
+    Includes validation for citations and checks to ensure the generated answer
+    is grounded in retrieved evidence.
+
+    Attributes:
+        None
     """
 
     # ==========================================================
-    # Retrieval-time guardrails (BEFORE answer generation)
-    # ==========================================================
-
-    @staticmethod
-    def enforce_single_document(
-        chunks: List[RetrievedChunk],
-        filters: Optional[Dict[str, Any]],
-    ) -> List[RetrievedChunk]:
-        """
-        If document-level filter is provided,
-        ensure all chunks come from that document.
-        """
-        if not filters:
-            return chunks
-
-        title = filters.get("title")
-        if not title:
-            return chunks
-
-        filtered = [c for c in chunks if c.source == title]
-
-        if not filtered:
-            raise GuardrailViolation(
-                f"No evidence found for document '{title}'."
-            )
-
-        return filtered
-
-    @staticmethod
-    def enforce_min_chunks(
-        chunks: List[RetrievedChunk],
-        min_chunks: int = 1,
-    ) -> List[RetrievedChunk]:
-        """
-        Ensure minimum evidence exists.
-        """
-        if len(chunks) < min_chunks:
-            raise GuardrailViolation(
-                "Insufficient evidence to answer the question."
-            )
-        return chunks
-
-    @staticmethod
-    def enforce_single_source(
-        chunks: List[RetrievedChunk],
-    ) -> None:
-        """
-        Ensure all chunks come from a single document.
-        """
-        sources = {c.source for c in chunks}
-
-        if len(sources) > 1:
-            raise GuardrailViolation(
-                f"Multiple document sources detected: {sorted(sources)}"
-            )
-
-    # ==========================================================
-    # Post-generation guardrails (AFTER LLM)
+    # Post-generation guardrails ONLY
     # ==========================================================
 
     @staticmethod
@@ -104,10 +25,21 @@ class AnswerGuardrails:
         cited_chunk_ids: Optional[List[str]],
     ) -> None:
         """
-        Ensure citations only reference chunks actually used.
+        Validates that all cited chunk IDs exist within the used chunks.
+
+        Args:
+            used_chunks (Optional[List[RetrievedChunk]]): Chunks used to generate the answer.
+            cited_chunk_ids (Optional[List[str]]): List of cited chunk IDs.
+
+        Returns:
+            None
+
+        Raises:
+            RegulatoryRAGException: If any cited chunk ID is not present in used_chunks.
         """
+        
         if not used_chunks or not cited_chunk_ids:
-            return  # safe no-op
+            return
 
         allowed_ids = {c.chunk_id for c in used_chunks}
 
@@ -117,7 +49,8 @@ class AnswerGuardrails:
         ]
 
         if invalid:
-            raise GuardrailViolation(
+            log.warning("invalid_citations_detected", invalid_ids=invalid)
+            raise RegulatoryRAGException(
                 f"Invalid citations detected: {invalid}"
             )
 
@@ -127,8 +60,16 @@ class AnswerGuardrails:
         allowed_chunks: List[RetrievedChunk],
     ) -> List[RetrievedChunk]:
         """
-        Remove any citations not present in allowed_chunks.
+        Filters citations to include only those present in allowed chunks.
+
+        Args:
+            citations (Optional[List[RetrievedChunk]]): List of citation chunks.
+            allowed_chunks (List[RetrievedChunk]): Valid chunks allowed for citation.
+
+        Returns:
+            List[RetrievedChunk]: Filtered list of valid citation chunks.
         """
+
         if not citations:
             return []
 
@@ -147,11 +88,22 @@ class AnswerGuardrails:
         min_overlap_ratio: float = 0.02,
     ) -> None:
         """
-        Basic grounding heuristic:
-        Ensure some overlap exists between answer text
-        and combined chunk content.
+        Ensures that the generated answer is sufficiently grounded in retrieved content.
 
-        This is lightweight and deterministic.
+        Computes token overlap between the answer and combined chunk content.
+
+        Args:
+            answer (str): Generated answer text.
+            used_chunks (List[RetrievedChunk]): Chunks used as evidence.
+            min_overlap_ratio (float): Minimum required overlap ratio.
+
+        Returns:
+            None
+
+        Raises:
+            RegulatoryRAGException:
+                - If no evidence is available.
+                - If overlap ratio is below threshold, indicating weak grounding.
         """
 
         if not answer.strip():
@@ -159,39 +111,19 @@ class AnswerGuardrails:
 
         combined_text = " ".join(c.content for c in used_chunks)
 
-        # Simple token-based overlap
         answer_tokens = set(answer.lower().split())
         chunk_tokens = set(combined_text.lower().split())
 
         if not chunk_tokens:
-            raise GuardrailViolation(
+            raise RegulatoryRAGException(
                 "No evidence available for grounding validation."
             )
 
         overlap = answer_tokens.intersection(chunk_tokens)
-
         overlap_ratio = len(overlap) / max(len(answer_tokens), 1)
 
         if overlap_ratio < min_overlap_ratio:
-            raise GuardrailViolation(
+            log.warning("low_grounding_score", overlap_ratio=overlap_ratio)
+            raise RegulatoryRAGException(
                 "Answer may not be sufficiently grounded in evidence."
             )
-
-    # ==========================================================
-    # Convenience wrapper
-    # ==========================================================
-
-    @staticmethod
-    def apply_retrieval_guardrails(
-        chunks: List[RetrievedChunk],
-        filters: Optional[Dict[str, Any]],
-        *,
-        min_chunks: int = 1,
-    ) -> List[RetrievedChunk]:
-        """
-        Apply ALL retrieval-time guardrails in order.
-        """
-        chunks = AnswerGuardrails.enforce_single_document(chunks, filters)
-        chunks = AnswerGuardrails.enforce_min_chunks(chunks, min_chunks)
-        AnswerGuardrails.enforce_single_source(chunks) # It is a validation function, it will raise if violated but won't modify the chunks.
-        return chunks
