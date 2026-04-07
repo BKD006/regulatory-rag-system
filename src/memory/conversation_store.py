@@ -6,6 +6,15 @@ from exception.custom_exception import RegulatoryRAGException
 
 
 class ConversationStore:
+    """
+    Handles storage and retrieval of conversation history (QA logs).
+
+    Provides methods to persist question-answer pairs and fetch recent
+    conversation history for session-based context.
+
+    Attributes:
+        None
+    """
 
     # ------------------------------------------
     # SAVE QA
@@ -18,6 +27,21 @@ class ConversationStore:
         citations: Optional[List[Dict]] = None,
         metadata: Optional[Dict[str, Any]] = None,
     ) -> None:
+        """
+        Saves a question-answer pair into the database.
+
+        Args:
+            query (str): User query.
+            answer (str): Generated answer.
+            citations (Optional[List[Dict]]): List of citation metadata.
+            metadata (Optional[Dict[str, Any]]): Additional metadata (e.g., session_id).
+
+        Returns:
+            None
+
+        Raises:
+            RegulatoryRAGException: If database insertion fails.
+        """
 
         try:
             async with db_utils.db_pool.acquire() as conn:
@@ -46,11 +70,32 @@ class ConversationStore:
             raise RegulatoryRAGException(e)
         
     # ------------------------------------------
+
     async def get_recent_history(
-    self,
-    session_id: str,
-    limit: int = 4
+        self,
+        session_id: str,
+        limit: int = 4
     ) -> List[Dict[str, str]]:
+        """
+        Retrieves recent conversation history for a given session.
+
+        Returns messages formatted for chat-based LLM input.
+
+        Args:
+            session_id (str): Identifier for the conversation session.
+            limit (int): Number of recent QA pairs to fetch.
+
+        Returns:
+            List[Dict[str, str]]:
+                List of messages in chronological order with roles:
+                [{"role": "user", "content": ...},
+                 {"role": "assistant", "content": ...}]
+
+        Notes:
+            - Results are returned in chronological order.
+            - Returns an empty list if retrieval fails.
+        """
+
         try:
             async with db_utils.db_pool.acquire() as conn:
                 rows = await conn.fetch(
