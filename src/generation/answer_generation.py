@@ -14,8 +14,23 @@ from logger import GLOBAL_LOGGER as log
 # ------------------------------------------------------------------
 
 class AnswerGenerator:
+    """
+    Generates answers using an LLM based on retrieved document chunks.
+
+    Applies strict constraints to ensure answers are grounded in a single document
+    and limits context size to avoid exceeding token limits.
+
+    Attributes:
+        llm (object): Loaded language model used for answer generation.
+    """
 
     def __init__(self):
+        """
+        Initializes the AnswerGenerator by loading the LLM.
+
+        Raises:
+            Exception: If LLM loading fails.
+        """
         self.llm = ModelLoader().load_llm()
         log.info("answer_generator_initialized")
 
@@ -30,7 +45,24 @@ class AnswerGenerator:
         chat_history: Optional[List[Dict]] = None,
         previous_answer: Optional[str] = None
     ) -> AnswerResult:
-        
+        """
+        Generates an answer to a question using retrieved document chunks.
+
+        Enforces constraints such as:
+        - Single document grounding
+        - Context size limitation
+        - Strict prompt rules to avoid hallucination
+
+        Args:
+            question (str): User query.
+            retrieved_chunks (List[RetrievedChunk]): Relevant chunks retrieved from documents.
+            chat_history (Optional[List[Dict]]): Prior conversation history.
+            previous_answer (Optional[str]): Previously generated answer for refinement.
+
+        Returns:
+            AnswerResult: Generated answer along with associated citations.
+        """
+
         # --------------------------------------------------
         # Handle empty retrieval case
         # --------------------------------------------------
@@ -69,9 +101,7 @@ class AnswerGenerator:
         # --------------------------------------------------
         # TOKEN-SAFE CONTEXT LIMITER
         # --------------------------------------------------
-        # Prevents exceeding LLM token limits (approx via char count)
-
-        MAX_CHARS = 8000  # Safe threshold for Groq / similar models
+        MAX_CHARS = 8000  # Approximate safe threshold
         total_chars = 0
         limited_chunks = []
 
@@ -104,10 +134,6 @@ class AnswerGenerator:
         # --------------------------------------------------
         # Build structured source blocks
         # --------------------------------------------------
-        # Format:
-        # [1] (Document Title)
-        # chunk content
-
         source_blocks = []
 
         for idx, chunk in enumerate(retrieved_chunks, start=1):
@@ -116,11 +142,13 @@ class AnswerGenerator:
             )
 
         sources_text = "\n\n".join(source_blocks)
+
         history_block = ""
         if chat_history:
             history_block = "\n\nConversation History:\n" + "\n".join(
                 f"{h['role']}: {h['content']}" for h in chat_history
             )
+
         previous_answer_block = ""
         if previous_answer:
             previous_answer_block = f"\n\nPrevious Answer:\n{previous_answer}"
@@ -131,7 +159,7 @@ class AnswerGenerator:
         user_prompt = ANSWER_USER_PROMPT_TEMPLATE.format(
             question=question,
             sources=sources_text,
-        )+ history_block+previous_answer_block
+        ) + history_block + previous_answer_block
 
         # --------------------------------------------------
         # Construct system prompt with strict rules

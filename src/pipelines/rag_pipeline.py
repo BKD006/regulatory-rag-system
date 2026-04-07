@@ -1,58 +1,107 @@
-from typing import Dict, Any, Optional, List
+from typing import Dict, Any, Optional
 from langgraph.graph import StateGraph, START
 from src.retrieval.hybrid_retriever_v2 import HybridRetriever
 from src.memory.conversation_store import ConversationStore
 from src.generation.answer_generation import AnswerGenerator
 from src.reranking.reranker import CrossEncoderReranker
-from src.guardrails.guardrails import AnswerGuardrails, GuardrailViolation
-from utils.models import RAGState, RetrievedChunk
+from utils.models import RAGState
 from utils.helper_functions import format_citations
 from logger import GLOBAL_LOGGER as log
 from exception.custom_exception import RegulatoryRAGException
 import re
 from src.cache.cache_manager import LLMAnswerCacheManager
 from langsmith import traceable, get_current_run_tree
+from src.guardrails.guardrails import AnswerGuardrails
+
 
 class RAGPipeline:
+    """
+    End-to-end Retrieval-Augmented Generation (RAG) pipeline using LangGraph.
+
+    Coordinates query rewriting, retrieval, reranking, answer generation,
+    caching, guardrails validation, and conversation persistence.
+
+    Attributes:
+        cache (LLMAnswerCacheManager): In-memory cache for responses.
+        guardrails (AnswerGuardrails): Post-generation validation layer.
+        conversation_store (ConversationStore): Stores and retrieves chat history.
+        retriever (HybridRetriever): Hybrid retrieval component (vector + BM25).
+        reranker (CrossEncoderReranker): Reranks retrieved chunks.
+        answer_generator (AnswerGenerator): Generates final answers using LLM.
+        graph (CompiledGraph): LangGraph execution graph.
+    """
     
     def __init__(self):
-
+        """
+        Initializes all pipeline components and builds the execution graph.
+        """
         self.cache = LLMAnswerCacheManager(memory_maxsize=1000,
-                                           memory_ttl_seconds=300,     # 5 min L1
-                                           )
+                                           memory_ttl_seconds=300)
+        self.guardrails = AnswerGuardrails()
         self.conversation_store = ConversationStore()
         self.retriever = HybridRetriever()
         self.reranker = CrossEncoderReranker(top_k=6)
         self.answer_generator = AnswerGenerator()
-        self.guardrails = AnswerGuardrails()
         self.graph = self._build_graph()
 
         log.info("rag_pipeline_initialized")
 
     # -------------------------------------------------
     # LangGraph Nodes
-    # -------------------------------------------------
+    # ------------------------------------------------
+
     @traceable(name="Retrieval")
     async def retrieval_node(self, state: RAGState) -> Dict[str, Any]:
+        """
+        Retrieves relevant chunks using hybrid retrieval and applies safety filters.
+
+        Args:
+            state (RAGState): Current pipeline state.
+
+        Returns:
+            Dict[str, Any]: Retrieved chunks and updated previous chunks.
+
+        Raises:
+            Exception: If retrieval fails.
+        """
         try:
-            query = state.rewritten_query or state.user_query
+            query = f"{state.user_query} {state.rewritten_query or ''}".strip()
+
             chunks = await self.retriever.retrieve(
                 query=query,
                 filters=state.filters,
             )
-            # Conversational fallback (handles weak + empty retrieval)
+
+            current_doc = (state.filters or {}).get("title")
+
+            if current_doc:
+                chunks = [
+                    c for c in chunks
+                    if c.source == current_doc
+                ]
+
             if len(chunks) < 2 and state.previous_chunks:
-                if state.chat_history:  # ensure it's a follow-up
-                    log.warning("weak_retrieval_fallback_to_previous_chunks")
-                    chunks = state.previous_chunks
+                safe_previous_chunks = [
+                    c for c in state.previous_chunks
+                    if c.source == current_doc
+                ]
+
+                if safe_previous_chunks:
+                    log.warning("fallback_to_previous_chunks_same_doc")
+                    chunks = safe_previous_chunks
 
             log.info(
                 "retrieval_node_completed",
-                chunk_count=len(chunks),
+                query=query,
+                retrieved_count=len(chunks),
+                sample_chunk_ids=[c.chunk_id for c in chunks[:3]],
+                sources=list(set([c.source for c in chunks])),
             )
 
-            return {"retrieved_chunks": chunks,
-                    "previous_chunks": chunks}
+            return {
+                "retrieved_chunks": chunks,
+                "previous_chunks": chunks,
+            }
 
         except Exception as e:
             log.error("retrieval_node_failed", error=str(e))
@@ -60,6 +109,15 @@ class RAGPipeline:
     
     @traceable(name="Rerank")
     async def rerank_node(self, state: RAGState) -> Dict[str, Any]:
+        """
+        Reranks retrieved chunks based on relevance to the query.
+
+        Args:
+            state (RAGState): Current pipeline state.
+
+        Returns:
+            Dict[str, Any]: Reranked chunks.
+        """
         chunks = state.retrieved_chunks or []
 
         reranked = self.reranker.rerank(
@@ -71,279 +129,292 @@ class RAGPipeline:
             "rerank_node_completed",
             input_chunks=len(chunks),
             output_chunks=len(reranked),
+            top_scores=[round(c.score, 3) for c in reranked[:3]],
         )
 
         return {"reranked_chunks": reranked}
 
     async def rewrite_node(self, state: RAGState) -> Dict[str, Any]:
-        history = state.chat_history
+        """
+        Rewrites user query using chat history to improve retrieval quality.
+
+        Args:
+            state (RAGState): Current pipeline state.
+
+        Returns:
+            Dict[str, Any]: Rewritten query.
+        """
+
+        history = state.chat_history or []
         query = state.user_query
+        current_doc = (state.filters or {}).get("title")
 
         if not history:
             return {"rewritten_query": query}
 
+        def strip_citations(text: str) -> str:
+            return re.sub(r"\[\d+\]", "", text)
+
+        cleaned_history = []
+        for h in history:
+            content = strip_citations(h["content"])
+
+            if current_doc and len(content) > 1000:
+                content = content[:1000]
+
+            cleaned_history.append({
+                "role": h["role"],
+                "content": content
+            })
+
         history_text = "\n".join(
-            f"{h['role']}: {h['content']}" for h in history
+            f"{h['role']}: {h['content']}" for h in cleaned_history
         )
+
+        previous_answer = ""
+        last_assistant_msgs = [
+            h["content"] for h in cleaned_history if h["role"] == "assistant"
+        ]
+        if last_assistant_msgs:
+            previous_answer = last_assistant_msgs[-1]
+
+        reference_keywords = ["paragraph", "section", "clause", "article"]
+        is_reference_query = any(k in query.lower() for k in reference_keywords)
+
+        vague_patterns = ["explain more", "elaborate", "more details", "explain it"]
+        is_vague = any(v in query.lower() for v in vague_patterns)
 
         prompt = f"""
-                    You are a query rewriting system for a retrieval engine.
+            You are a query rewriting system for a retrieval engine.
 
-                    Convert the follow-up question into a COMPLETE standalone query.
+            Your task:
+            Convert the follow-up question into a COMPLETE, standalone, retrieval-optimized query.
 
-                    STRICT RULES:
-                    - Resolve all references like "it", "this", "that"
-                    - Include domain-specific terms from conversation
-                    - Expand vague queries into detailed searchable queries
-                    - DO NOT return short queries
+            STRICT RULES:
+            - Resolve references like "this", "that", "it"
+            - Include the SUBJECT from previous conversation
+            - Expand vague queries into descriptive queries
+            - Preserve domain-specific terms
+            - DO NOT shorten the query
+            - Output ONLY the rewritten query
 
-                    Conversation:
-                    {history_text}
+            Conversation:
+            {history_text}
 
-                    Follow-up:
-                    {query}
+            Previous Answer:
+            {previous_answer}
 
-                    Standalone Query:
-                """
-        rewritten = await self.answer_generator.llm.ainvoke(prompt)
-        return {"rewritten_query": rewritten.content.strip()}
+            Follow-up Question:
+            {query}
 
-    async def guardrail_node(self, state: RAGState) -> Dict[str, Any]:
-        chunks: List[RetrievedChunk] = (
-            state.reranked_chunks or state.retrieved_chunks or []
-        )
+            Rewritten Query:
+            """
 
         try:
-            min_required_chunks = 2
+            rewritten = await self.answer_generator.llm.ainvoke(prompt)
+            rewritten_query = rewritten.content.strip()
 
-            # Relax rule for conversational follow-ups
-            if state.chat_history:
-                min_required_chunks = 1
+            if not rewritten_query:
+                rewritten_query = query
 
-            guarded_chunks = self.guardrails.apply_retrieval_guardrails(
-                chunks=chunks,
-                filters=state.filters,
-                min_chunks=min_required_chunks,
-            )
+            if len(rewritten_query.split()) < 5:
+                rewritten_query = f"{query} {previous_answer[:200]}"
+
+            if is_reference_query and previous_answer:
+                rewritten_query = f"{rewritten_query} {previous_answer[:300]}"
+
+            if is_vague and previous_answer:
+                rewritten_query = f"Detailed explanation of {previous_answer[:300]}"
 
             log.info(
-                "guardrails_passed",
-                chunk_count=len(guarded_chunks),
+                "query_rewritten",
+                original=query,
+                rewritten=rewritten_query,
+                is_reference=is_reference_query,
+                is_vague=is_vague
             )
 
-            return {"guarded_chunks": guarded_chunks}
+            return {"rewritten_query": rewritten_query}
 
-        except GuardrailViolation as e:
-            # EXPECTED, SAFE REFUSAL (not an error)
-            log.warning(
-                "guardrail_blocked",
-                reason=str(e),
-                chunk_count=len(chunks),
-            )
-
-            return {
-                "answer": str(e),
-                "citations": [],
-            }
+        except Exception as e:
+            log.error("rewrite_failed", error=str(e))
+            return {"rewritten_query": query}
 
     @traceable(name="Answer_Generation")
     async def answer_node(self, state: RAGState) -> Dict[str, Any]:
-        chunks = state.guarded_chunks or []
+        """
+        Generates final answer with validation, retry logic, and guardrails enforcement.
 
-        if not chunks:
-            log.warning("answer_node_no_chunks")
+        Args:
+            state (RAGState): Current pipeline state.
 
-            return {
-                "answer": (
-                    "The question cannot be answered safely "
-                    "from the selected document."
-                ),
-                "citations": [],
-            }
+        Returns:
+            Dict[str, Any]: Final answer and validated citations.
+        """
 
-        try:
-            # Extract previous answer
-            def strip_citations(text: str) -> str:
-                return re.sub(r"\[\d+\]", "", text)
+        attempts = [
+            ("primary", state.reranked_chunks or []),
+            ("fallback", state.retrieved_chunks or []),
+        ]
 
-            previous_answer = ""
-            if state.chat_history:
-                previous_answer = strip_citations(
-                    state.chat_history[-1]["content"]
+        for attempt_name, chunks in attempts:
+
+            if not chunks:
+                continue
+
+            cited_chunks = []
+
+            try:
+                log.info("answer_attempt_started", attempt=attempt_name, chunk_count=len(chunks))
+
+                result = await self.answer_generator.generate(
+                    question=state.user_query,
+                    retrieved_chunks=chunks,
+                    chat_history=state.chat_history,
                 )
-            cleaned_history = []
-            for h in state.chat_history:
-                cleaned_history.append({
-                    "role": h["role"],
-                    "content": strip_citations(h["content"])
-                })
-            # ---------------------------------------------
-            # Generate Answer
-            # ---------------------------------------------
-            result = await self.answer_generator.generate(
-                question=state.user_query,
-                retrieved_chunks=chunks,
-                chat_history=cleaned_history,
-                previous_answer=previous_answer
-            )
 
-            answer_text = result.answer
+                answer_text = result.answer
 
-            # ---------------------------------------------
-            # Extract citation numbers from answer text
-            # Example: [1], [5], [12]
-            # ---------------------------------------------
-            citation_matches = re.findall(r"\[(\d+)\]", answer_text)
+                citation_matches = re.findall(r"\[(\d+)\]", answer_text)
 
-            # Convert to zero-based indices
-            cited_indices = {
-                int(num) - 1
-                for num in citation_matches
-            }
+                cited_indices = {
+                    int(num) - 1 for num in citation_matches
+                }
 
-            # ---------------------------------------------
-            # Validate citation indices
-            # ---------------------------------------------
-            invalid_indices = [
-                idx for idx in cited_indices
-                if idx < 0 or idx >= len(chunks)
-            ]
+                raw_cited_chunks = [
+                    chunks[idx]
+                    for idx in cited_indices
+                    if 0 <= idx < len(chunks)
+                ]
 
-            if invalid_indices:
+                cited_chunks = self.guardrails.filter_citations(
+                    raw_cited_chunks,
+                    chunks,
+                )
+
+                self.guardrails.validate_citations(
+                    used_chunks=chunks,
+                    cited_chunk_ids=[c.chunk_id for c in cited_chunks],
+                )
+
+                self.guardrails.enforce_answer_grounded(
+                    answer_text,
+                    cited_chunks,
+                )
+
+                return {
+                    "answer": answer_text,
+                    "citations": cited_chunks,
+                }
+
+            except RegulatoryRAGException as e:
                 log.warning(
-                    "invalid_citation_indices_detected",
-                    invalid_indices=invalid_indices,
+                    "validation_failed",
+                    attempt=attempt_name,
+                    reason=str(e),
+                    chunk_count=len(chunks),
+                    cited_chunks=len(cited_chunks),
                 )
-                raise GuardrailViolation(
-                    f"Invalid citation numbers detected: {invalid_indices}"
-                )
+                continue
 
-            # ---------------------------------------------
-            # Map indices to actual chunks
-            # ---------------------------------------------
-            cited_chunks = [
-                chunks[idx]
-                for idx in sorted(cited_indices)
-            ]
+        log.warning("all_attempts_failed", query=state.user_query)
 
-            # ---------------------------------------------
-            # Deterministic citation validation
-            # ---------------------------------------------
-            self.guardrails.validate_citations(
-                used_chunks=chunks,
-                cited_chunk_ids=[c.chunk_id for c in cited_chunks],
-            )
-
-            # ---------------------------------------------
-            # Grounding enforcement
-            # ---------------------------------------------
-            self.guardrails.enforce_answer_grounded(
-                answer_text,
-                cited_chunks,
-            )
-
-            log.info(
-                "answer_generated",
-                chunks_provided=len(chunks),
-                citations_used=len(cited_chunks),
-            )
-
-            return {
-                "answer": answer_text,
-                "citations": cited_chunks,
-            }
-
-        except GuardrailViolation as e:
-            log.warning(
-                "answer_guardrail_blocked",
-                reason=str(e),
-            )
-
-            return {
-                "answer": str(e),
-                "citations": [],
-            }
-
-        except Exception as e:
-            log.error("answer_generation_failed", error=str(e))
-            raise
+        return {
+            "answer": "The answer is not clearly supported by the document.",
+            "citations": [],
+        }
 
     # -------------------------------------------------
     # Graph wiring
     # -------------------------------------------------
 
     def _build_graph(self):
+        """
+        Builds the LangGraph workflow connecting all pipeline nodes.
+
+        Returns:
+            CompiledGraph: Executable LangGraph pipeline.
+        """
         graph = StateGraph(RAGState)
 
         graph.add_node("rewrite", self.rewrite_node)
         graph.add_node("retrieve", self.retrieval_node)
         graph.add_node("rerank", self.rerank_node)
-        graph.add_node("guardrails", self.guardrail_node)
         graph.add_node("answer", self.answer_node)
 
         graph.add_edge(START, "rewrite")
         graph.add_edge("rewrite", "retrieve")
         graph.add_edge("retrieve", "rerank")
-        graph.add_edge("rerank", "guardrails")
-        graph.add_edge("guardrails", "answer")
+        graph.add_edge("rerank", "answer")
 
         return graph.compile()
 
     # -------------------------------------------------
     # Public API
     # -------------------------------------------------
+
     @traceable(name="RAG_Run")
     async def run(
         self,
         query: str,
         filters: Optional[Dict[str, Any]] = None,
     ) -> Dict[str, Any]:
-        log.info(
-            "rag_run_started",
-            has_filters=bool(filters),
-        )
+        """
+        Executes the full RAG pipeline for a given query.
+
+        Handles caching, conversation history, pipeline execution,
+        and persistence of results.
+
+        Args:
+            query (str): User query.
+            filters (Optional[Dict[str, Any]]): Retrieval filters (e.g., document title).
+
+        Returns:
+            Dict[str, Any]: Final response containing answer and citations.
+
+        Raises:
+            RegulatoryRAGException: If pipeline execution fails.
+        """
+
+        log.info("rag_run_started", has_filters=bool(filters))
 
         try:
-            session_id = f"doc:{(filters or {}).get('title', 'default')}"
-            # -------------------------------------------------
-            # 1. Generate deterministic cache key
-            # -------------------------------------------------
+            current_doc = (filters or {}).get("title", "default")
+            session_id = f"doc:{current_doc}"
+
             cache_key = self.cache.make_key(
                 question=query,
                 namespace=f"rag:{session_id}",
             )
 
-            # -------------------------------------------------
-            # 2. Check Hybrid Cache (L1 → L2)
-            # -------------------------------------------------
             cached = await self.cache.get(cache_key)
+
             run_tree = get_current_run_tree()
             if run_tree:
                 run_tree.metadata.update({
                     "has_filters": bool(filters),
                     "cache_hit": cached is not None,
                     "query_length": len(query),
+                    "document": current_doc,
                 })
+
             if cached:
-                log.info("rag_cache_hit")
+                log.info("rag_cache_hit", document=current_doc)
                 return cached
 
-            log.info("rag_cache_miss")
-            # -------------------------------------------------
-            # 3. Fetch conversation history (LAST 4 TURNS)
-            # -------------------------------------------------
             chat_history = await self.conversation_store.get_recent_history(
                 session_id=session_id,
                 limit=4
-                )
-            # -------------------------------------------------
-            # 4. Run Graph (cold path)
-            # -------------------------------------------------
+            )
+
+            previous_chunks = []
+
             final_state = await self.graph.ainvoke(
                 RAGState(
                     user_query=query,
                     filters=filters or {},
-                    chat_history=chat_history
+                    chat_history=chat_history,
+                    previous_chunks=previous_chunks,
                 )
             )
 
@@ -351,7 +422,6 @@ class RAGPipeline:
                 final_state.get("citations", [])
             )
 
-            # Ensure JSON-safe
             safe_citations = [
                 c.model_dump() if hasattr(c, "model_dump") else c
                 for c in raw_citations
@@ -362,34 +432,26 @@ class RAGPipeline:
                 "citations": safe_citations,
             }
 
-            # Save assistant response to conversation storage
-            if response["answer"] and not response["answer"].startswith("The question cannot be answered safely"):
+            if response["answer"] and not response["answer"].startswith(
+                "The question cannot be answered safely"
+            ):
                 try:
                     await self.conversation_store.save_qa(
                         query=query,
                         answer=response["answer"],
                         citations=response["citations"],
                         metadata={
-                                "filters": filters,
-                                "session_id": session_id,
-                                "citation_count": len(response["citations"]),
-                                "query_length": len(query),
-                                "has_cache": cached is not None,
-                            }
+                            "filters": filters,
+                            "session_id": session_id,
+                            "document": current_doc,
+                        }
                     )
                 except Exception as e:
                     log.error("conversation_store_save_failed", error=str(e))
 
-            # -------------------------------------------------
-            # 4. Store Only Valid Answers
-            # -------------------------------------------------
-            if response["answer"] and not response["answer"].startswith("The question cannot be answered safely"):
-                await self.cache.set(
-                    cache_key,
-                    response,
-                )
+                await self.cache.set(cache_key, response)
 
-            log.info("rag_run_completed")
+            log.info("rag_run_completed", document=current_doc)
 
             return response
 
