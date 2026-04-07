@@ -1,12 +1,6 @@
-"""
-Cross-encoder reranker for RAG.
-
-- Improves precision after retrieval
-- Production-safe (summary logging only)
-"""
-
 from typing import List
 from sentence_transformers import CrossEncoder
+
 from utils.models import RetrievedChunk
 from logger import GLOBAL_LOGGER as log
 from exception.custom_exception import RegulatoryRAGException
@@ -14,10 +8,16 @@ from exception.custom_exception import RegulatoryRAGException
 
 class CrossEncoderReranker:
     """
-    Cross-encoder reranker with:
-    - score thresholding
-    - metadata enrichment
-    - top-k control
+    Reranks retrieved document chunks using a cross-encoder model.
+
+    Uses a transformer-based cross-encoder to compute relevance scores
+    between a query and each chunk, improving retrieval quality.
+
+    Attributes:
+        model_name (str): Name of the cross-encoder model.
+        top_k (int): Number of top chunks to return after reranking.
+        min_score (float): Minimum score threshold (currently unused).
+        model (CrossEncoder): Loaded cross-encoder model instance.
     """
 
     def __init__(
@@ -27,11 +27,25 @@ class CrossEncoderReranker:
         min_score: float = 0,
         device: str = "cpu",
     ):
+        """
+        Initializes the CrossEncoderReranker with the specified model.
+
+        Args:
+            model_name (str): HuggingFace model name for cross-encoder.
+            top_k (int): Number of top-ranked chunks to return.
+            min_score (float): Minimum score threshold for filtering (not enforced).
+            device (str): Device to load the model on ("cpu" or "cuda").
+
+        Raises:
+            RegulatoryRAGException: If model initialization fails.
+        """
+
         self.model_name = model_name
         self.top_k = top_k
         self.min_score = min_score
 
         try:
+            # Load cross-encoder model (uses transformers + torch)
             self.model = CrossEncoder(
                 model_name,
                 device=device,
@@ -63,7 +77,18 @@ class CrossEncoderReranker:
         chunks: List[RetrievedChunk],
     ) -> List[RetrievedChunk]:
         """
-        Rerank retrieved chunks using cross-encoder.
+        Reranks retrieved chunks based on relevance to the query.
+
+        Args:
+            query (str): User query.
+            chunks (List[RetrievedChunk]): List of retrieved chunks.
+
+        Returns:
+            List[RetrievedChunk]: Top-k reranked chunks sorted by relevance.
+
+        Notes:
+            - Falls back to original chunks if reranking fails.
+            - Always returns at most top_k chunks.
         """
 
         if not chunks:
@@ -75,14 +100,15 @@ class CrossEncoderReranker:
         )
 
         try:
+            # Create (query, chunk) pairs
             pairs = [(query, c.content) for c in chunks]
+
+            # Compute scores
             scores = self.model.predict(pairs)
 
             reranked: List[RetrievedChunk] = []
 
             for chunk, score in zip(chunks, scores):
-                if score < self.min_score:
-                    continue
 
                 metadata = dict(chunk.metadata or {})
                 metadata.update(
@@ -103,13 +129,20 @@ class CrossEncoderReranker:
                     )
                 )
 
+            # Sort by score
             reranked.sort(key=lambda c: c.score, reverse=True)
+
+            # Always take top_k
             final = reranked[: self.top_k]
+
+            # SAFETY FALLBACK (critical)
+            if not final:
+                log.warning("reranker_empty_fallback")
+                return chunks[: self.top_k]
 
             log.info(
                 "reranking_completed",
                 input_chunks=len(chunks),
-                passed_threshold=len(reranked),
                 output_chunks=len(final),
             )
 
@@ -121,4 +154,6 @@ class CrossEncoderReranker:
                 input_chunks=len(chunks),
                 error=str(e),
             )
-            raise RegulatoryRAGException(e)
+
+            # HARD FALLBACK
+            return chunks[: self.top_k]
