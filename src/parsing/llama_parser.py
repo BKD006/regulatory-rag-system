@@ -1,14 +1,3 @@
-"""
-LlamaParse document parser wrapper.
-
-Replaces Docling DocumentConverter.
-
-Responsibilities:
-- Parse PDF using LlamaParse
-- Return markdown text
-- Hide parser implementation from ingestion pipeline
-"""
-
 import os
 import sys
 import asyncio
@@ -23,30 +12,41 @@ from exception.custom_exception import RegulatoryRAGException
 
 class LlamaDocumentParser:
     """
-    Wrapper around LlamaParse.
+    Parser class for extracting document content using LlamaParse API.
 
-    Returns markdown text suitable for chunking.
+    Attributes:
+        api_key (str): API key for authenticating with Llama Cloud.
+        parser (LlamaParse): Instance used to parse documents into markdown format.
     """
 
     def __init__(self):
+        """
+        Initializes the LlamaDocumentParser with API credentials and parser client.
+
+        Raises:
+            RegulatoryRAGException:
+                - If the API key is missing.
+                - If parser initialization fails.
+        """
 
         load_dotenv()
 
+        # Fetch API key from environment
         self.api_key = os.getenv("LLAMA_CLOUD_API_KEY")
 
         if not self.api_key:
-            log.error(
-                "llama_parser_missing_api_key"
-            )
+            log.error("llama_parser_missing_api_key")
+
             raise RegulatoryRAGException(
                 "LLAMA_CLOUD_API_KEY not set",
                 sys,
             )
 
         try:
+            # Initialize LlamaParse client
             self.parser = LlamaParse(
                 api_key=self.api_key,
-                result_type="markdown",  # IMPORTANT
+                result_type="markdown",  # Ensures output is chunking-friendly
                 verbose=False,
             )
 
@@ -56,7 +56,6 @@ class LlamaDocumentParser:
             )
 
         except Exception as e:
-
             log.error(
                 "llama_parser_init_failed",
                 error=str(e),
@@ -73,12 +72,26 @@ class LlamaDocumentParser:
         file_path: str,
     ) -> str:
         """
-        Parse document using LlamaParse.
+        Parses a document file asynchronously using LlamaParse.
+
+        Converts the document into markdown format and merges all parsed segments
+        into a single string.
+
+        Args:
+            file_path (str): Path to the input document file.
 
         Returns:
-            markdown text
+            str: Extracted document content as a single markdown string.
+
+        Raises:
+            RegulatoryRAGException:
+                - If the file does not exist.
+                - If parsing fails due to API or processing errors.
         """
 
+        # --------------------------
+        # Validate file existence
+        # --------------------------
         if not os.path.exists(file_path):
             raise RegulatoryRAGException(
                 f"File not found: {file_path}",
@@ -91,13 +104,13 @@ class LlamaDocumentParser:
         )
 
         try:
-
-            # LlamaParse is sync → run in thread
+            # LlamaParse API is synchronous → run in thread
             documents = await asyncio.to_thread(
                 self.parser.load_data,
                 file_path,
             )
 
+            # Merge all returned segments into one string
             text = self._join_documents(documents)
 
             log.info(
@@ -109,7 +122,6 @@ class LlamaDocumentParser:
             return text
 
         except Exception as e:
-
             log.error(
                 "llama_parsing_failed",
                 file=file_path,
@@ -127,14 +139,19 @@ class LlamaDocumentParser:
         documents: List,
     ) -> str:
         """
-        Merge multiple LlamaParse docs into one string.
+        Combines multiple parsed document segments into a single string.
+
+        Args:
+            documents (List): List of document objects returned by LlamaParse.
+
+        Returns:
+            str: Concatenated text content from all valid document segments.
         """
 
         texts = []
 
         for doc in documents:
-
-            # LlamaParse returns objects with .text
+            # Each document object contains `.text`
             if hasattr(doc, "text") and doc.text:
                 texts.append(doc.text)
 

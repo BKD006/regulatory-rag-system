@@ -1,13 +1,3 @@
-"""
-Docling parser wrapper.
-
-Used by ingest.py
-
-Responsibilities:
-- Parse PDF using Docling
-- Return markdown + DoclingDocument
-"""
-
 import os
 import sys
 from pathlib import Path
@@ -25,13 +15,21 @@ load_dotenv()
 
 class DoclingDocumentParser:
     """
-    Wrapper around Docling DocumentConverter.
+    Parser class for extracting structured content from documents using Docling.
+
+    Attributes:
+        converter (DocumentConverter): Instance used to convert documents into structured format.
     """
 
     def __init__(self):
+        """
+        Initializes the DoclingDocumentParser with a DocumentConverter instance.
 
+        Raises:
+            RegulatoryRAGException: If initialization of the converter fails.
+        """
         try:
-
+            # Core Docling converter for parsing documents
             self.converter = DocumentConverter()
 
             log.info(
@@ -39,7 +37,6 @@ class DoclingDocumentParser:
             )
 
         except Exception as e:
-
             log.error(
                 "docling_parser_init_failed",
                 error=str(e),
@@ -56,15 +53,29 @@ class DoclingDocumentParser:
         file_path: str,
     ) -> Tuple[str, Optional[object]]:
         """
-        Parse document.
+        Parses a document file and extracts its content.
+
+        Supports PDF files via Docling for structured parsing and falls back to
+        plain text reading for TXT/MD files.
+
+        Args:
+            file_path (str): Path to the input document file.
 
         Returns:
-            content (markdown),
-            docling_doc
+            Tuple[str, Optional[object]]:
+                - Extracted content as a string (markdown for PDFs, raw text otherwise).
+                - Parsed Docling document object if PDF, else None.
+
+        Raises:
+            RegulatoryRAGException:
+                - If the file does not exist.
+                - If parsing fails due to any internal error.
         """
 
+        # --------------------------
+        # Validate file existence
+        # --------------------------
         if not os.path.exists(file_path):
-
             raise RegulatoryRAGException(
                 f"File not found: {file_path}",
                 sys,
@@ -73,7 +84,9 @@ class DoclingDocumentParser:
         ext = Path(file_path).suffix.lower()
 
         try:
-
+            # --------------------------
+            # PDF parsing (Docling)
+            # --------------------------
             if ext == ".pdf":
 
                 log.info(
@@ -81,13 +94,11 @@ class DoclingDocumentParser:
                     file=file_path,
                 )
 
-                result = self.converter.convert(
-                    file_path
-                )
+                # Convert PDF → structured document
+                result = self.converter.convert(file_path)
 
-                content = (
-                    result.document.export_to_markdown()
-                )
+                # Export structured content to markdown
+                content = result.document.export_to_markdown()
 
                 docling_doc = result.document
 
@@ -102,13 +113,11 @@ class DoclingDocumentParser:
             # --------------------------
             # TXT / MD fallback
             # --------------------------
-
             with open(
                 file_path,
                 "r",
                 encoding="utf-8",
             ) as f:
-
                 text = f.read()
 
             return text, None

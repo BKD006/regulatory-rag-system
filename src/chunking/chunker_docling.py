@@ -1,13 +1,4 @@
-"""
-Document chunking strategies.
-
-- Docling HybridChunker (preferred)
-- RecursiveCharacterTextSplitter fallback
-- NO per-chunk logging
-"""
-
 from typing import List, Dict, Any, Optional
-from dataclasses import dataclass
 from langchain_text_splitters import RecursiveCharacterTextSplitter
 from transformers import AutoTokenizer
 from docling.chunking import HybridChunker
@@ -15,30 +6,48 @@ from docling_core.types.doc import DoclingDocument
 from utils.models import DocumentChunk, ChunkingConfig
 from logger import GLOBAL_LOGGER as log
 
+
 # ------------------------------------------------------------------
 # Docling Hybrid Chunker
 # ------------------------------------------------------------------
 
 class DoclingHybridChunker:
     """
-    Wrapper around Docling HybridChunker.
+    Hybrid chunker that leverages Docling structure-aware chunking with token constraints.
 
-    Guarantees:
-    - Token-aware chunking
-    - Structure preservation
-    - Summary-level logging only
+    Falls back to simple recursive text splitting when structured chunking is unavailable
+    or fails.
+
+    Attributes:
+        config (ChunkingConfig): Configuration controlling chunk sizes and overlap.
+        tokenizer (AutoTokenizer): Tokenizer used for token-aware chunking.
+        chunker (HybridChunker): Docling hybrid chunking engine.
     """
 
     def __init__(self, config: ChunkingConfig):
+        """
+        Initializes the DoclingHybridChunker with tokenizer and hybrid chunker.
+
+        Args:
+            config (ChunkingConfig): Configuration for chunking behavior.
+
+        Raises:
+            ValueError: If max_tokens is not greater than 0.
+            Exception: If tokenizer or chunker initialization fails.
+        """
+        
         self.config = config
 
         if config.max_tokens <= 0:
             raise ValueError("max_tokens must be > 0")
 
         try:
+            # Initialize tokenizer for token-aware chunking
             self.tokenizer = AutoTokenizer.from_pretrained(
                 "sentence-transformers/all-MiniLM-L6-v2"
             )
+
+            # Initialize Docling hybrid chunker
             self.chunker = HybridChunker(
                 tokenizer=self.tokenizer,
                 max_tokens=config.max_tokens,
@@ -63,10 +72,28 @@ class DoclingHybridChunker:
         metadata: Optional[Dict[str, Any]] = None,
         docling_doc: Optional[DoclingDocument] = None,
     ) -> List[DocumentChunk]:
+        """
+        Splits a document into structured chunks using Docling or fallback logic.
+
+        Args:
+            content (str): Full document content.
+            title (str): Title of the document.
+            source (str): Source identifier (e.g., file path).
+            metadata (Optional[Dict[str, Any]]): Additional metadata to attach to each chunk.
+            docling_doc (Optional[DoclingDocument]): Structured Docling document.
+
+        Returns:
+            List[DocumentChunk]: List of generated document chunks.
+
+        Notes:
+            - Uses Docling hybrid chunking if structured document is provided.
+            - Falls back to simple chunking if docling_doc is None or chunking fails.
+        """
 
         if not content or not content.strip():
             return []
 
+        # Base metadata applied to all chunks
         base_metadata = {
             "title": title,
             "source": source,
@@ -74,6 +101,7 @@ class DoclingHybridChunker:
             **(metadata or {}),
         }
 
+        # Fallback if Docling structure is unavailable
         if docling_doc is None:
             log.warning(
                 "docling_doc_missing_fallback_used",
@@ -82,13 +110,17 @@ class DoclingHybridChunker:
             return self._simple_fallback_chunk(content, base_metadata)
 
         try:
+            # Generate structured chunks using Docling
             raw_chunks = list(self.chunker.chunk(dl_doc=docling_doc))
             document_chunks: List[DocumentChunk] = []
 
             current_pos = 0
 
             for idx, chunk in enumerate(raw_chunks):
+                # Convert chunk to contextualized text
                 text = self.chunker.contextualize(chunk=chunk)
+
+                # Token count for chunk
                 token_count = len(self.tokenizer.encode(text))
 
                 end_pos = current_pos + len(text)
@@ -120,6 +152,7 @@ class DoclingHybridChunker:
             return document_chunks
 
         except Exception as e:
+            # Fallback on failure
             log.warning(
                 "hybrid_chunking_failed_fallback_used",
                 title=title,
@@ -136,6 +169,16 @@ class DoclingHybridChunker:
         content: str,
         base_metadata: Dict[str, Any],
     ) -> List[DocumentChunk]:
+        """
+        Splits content using a simple recursive character-based strategy.
+
+        Args:
+            content (str): Raw document content.
+            base_metadata (Dict[str, Any]): Metadata applied to all chunks.
+
+        Returns:
+            List[DocumentChunk]: List of fallback chunks.
+        """
 
         splitter = RecursiveCharacterTextSplitter(
             chunk_size=self.config.chunk_size,
@@ -159,6 +202,7 @@ class DoclingHybridChunker:
             if not text:
                 continue
 
+            # Locate chunk position in original content
             found_at = content.find(text, start_pos)
             if found_at == -1:
                 found_at = start_pos
@@ -190,99 +234,18 @@ class DoclingHybridChunker:
 
 
 # ------------------------------------------------------------------
-# Simple Recursive Chunker (explicit opt-in)
-# ------------------------------------------------------------------
-
-class SimpleChunker:
-    """
-    Simple non-semantic chunker.
-
-    Use only when semantic chunking is disabled.
-    """
-
-    def __init__(self, config: ChunkingConfig):
-        self.config = config
-        self.splitter = RecursiveCharacterTextSplitter(
-            chunk_size=config.chunk_size,
-            chunk_overlap=config.chunk_overlap,
-            separators=[
-                "\n\n",
-                "\n",
-                ". ",
-                " ",
-                "",
-            ],
-        )
-
-        log.info(
-            "simple_chunker_initialized",
-            chunk_size=config.chunk_size,
-            overlap=config.chunk_overlap,
-        )
-
-    async def chunk_document(
-        self,
-        *,
-        content: str,
-        title: str,
-        source: str,
-        metadata: Optional[Dict[str, Any]] = None,
-        **_,
-    ) -> List[DocumentChunk]:
-
-        if not content or not content.strip():
-            return []
-
-        texts = self.splitter.split_text(content)
-
-        chunks: List[DocumentChunk] = []
-        start_pos = 0
-
-        for idx, text in enumerate(texts):
-            text = text.strip()
-            if not text:
-                continue
-
-            found_at = content.find(text, start_pos)
-            if found_at == -1:
-                found_at = start_pos
-
-            end_pos = found_at + len(text)
-            start_pos = end_pos
-
-            chunks.append(
-                DocumentChunk(
-                    content=text,
-                    index=idx,
-                    start_char=found_at,
-                    end_char=end_pos,
-                    metadata={
-                        "title": title,
-                        "source": source,
-                        "chunk_method": "recursive",
-                        "total_chunks": len(texts),
-                        **(metadata or {}),
-                    },
-                )
-            )
-
-        log.info(
-            "simple_chunking_completed",
-            title=title,
-            chunk_count=len(chunks),
-        )
-
-        return chunks
-
-
-# ------------------------------------------------------------------
 # Factory
 # ------------------------------------------------------------------
 
 def create_chunker(config: ChunkingConfig):
     """
-    Create appropriate chunker based on configuration.
+    Factory function to create a DoclingHybridChunker instance.
+
+    Args:
+        config (ChunkingConfig): Configuration for chunking.
+
+    Returns:
+        DoclingHybridChunker: Initialized chunker instance.
     """
-    if config.use_semantic_splitting:
-        return DoclingHybridChunker(config)
-    return SimpleChunker(config)
+    
+    return DoclingHybridChunker(config)
