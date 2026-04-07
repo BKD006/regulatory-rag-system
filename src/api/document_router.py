@@ -20,7 +20,14 @@ router = APIRouter(
 @router.get("/documents")
 async def get_documents():
     """
-    Returns all ingested documents.
+    Retrieves all documents stored in the system.
+
+    Returns:
+        List[Dict[str, Any]]: List of documents with metadata.
+
+    Raises:
+        HTTPException:
+            - 500: If document retrieval fails.
     """
     try:
         return await list_documents()
@@ -43,8 +50,16 @@ async def get_documents():
 @router.get("/documents/titles")
 async def get_document_titles():
     """
-    Returns only document titles.
-    Useful for UI filters.
+    Retrieves a list of document titles.
+
+    Useful for UI filters and selection.
+
+    Returns:
+        List[str]: List of document titles.
+
+    Raises:
+        HTTPException:
+            - 500: If retrieval fails.
     """
     try:
         return await list_document_titles()
@@ -67,7 +82,18 @@ async def get_document_titles():
 @router.delete("/documents/{title}")
 async def delete_document(title: str):
     """
-    Deletes a document and all its chunks.
+    Deletes a document and all its associated chunks.
+
+    Args:
+        title (str): Title of the document to delete.
+
+    Returns:
+        Dict[str, str]: Confirmation message indicating successful deletion.
+
+    Raises:
+        HTTPException:
+            - 404: If the document is not found.
+            - 500: If deletion fails due to server error.
     """
     try:
         await delete_document_by_title(title)

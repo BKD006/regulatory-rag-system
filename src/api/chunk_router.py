@@ -15,14 +15,25 @@ router = APIRouter(
 @router.get("/chunks/{chunk_id}")
 async def get_chunk(chunk_id: str):
     """
-    Retrieve a specific chunk by ID.
+    Retrieves a document chunk by its unique identifier.
 
-    Useful for:
-    - debugging retrieval results
-    - inspecting citation sources
-    - UI citation expansion
+    Args:
+        chunk_id (str): Unique identifier of the chunk.
+
+    Returns:
+        Dict[str, Any]: Dictionary containing chunk details including:
+            - chunk_id (str)
+            - document_id (str)
+            - content (str)
+            - metadata (dict)
+            - token_count (int)
+
+    Raises:
+        HTTPException:
+            - 400: If the chunk_id format is invalid.
+            - 404: If the chunk is not found.
+            - 500: If retrieval fails due to server error.
     """
-
     try:
         row = await get_chunk_by_id(chunk_id)
 

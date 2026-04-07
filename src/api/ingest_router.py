@@ -24,12 +24,25 @@ ingestion_pipeline = DocumentIngestionPipeline(
 @router.post("/ingest")
 async def ingest_document(file: UploadFile = File(...)):
     """
-    Upload and ingest a regulatory document (PDF).
+    Uploads a document and triggers the ingestion pipeline.
 
-    Steps:
-    - Save uploaded file
-    - Run ingestion pipeline
-    - Chunk + embed + store
+    The file is saved locally and then processed through the ingestion pipeline,
+    which includes parsing, chunking, embedding, and storing in the database.
+
+    Args:
+        file (UploadFile): File uploaded by the user.
+
+    Returns:
+        Dict[str, Any]: Response containing:
+            - message (str): Status message.
+            - uploaded_file (str): Name of the uploaded file.
+            - files_processed (int): Number of processed files.
+            - results (List[Dict]): Detailed ingestion results per file.
+
+    Raises:
+        HTTPException:
+            - 500: If ingestion fails due to processing error.
+            - 500: If an unexpected server error occurs.
     """
 
     os.makedirs(DATA_DIR, exist_ok=True)

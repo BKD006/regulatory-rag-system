@@ -12,13 +12,19 @@ router = APIRouter(
 @router.get("/health")
 async def health():
     """
-    Production health check.
+    Performs a production health check for the service.
 
-    Verifies:
-    - API availability
-    - PostgreSQL connection
-    - pgvector capability
-    - Bedrock model connectivity
+    Verifies the availability and connectivity of key system components:
+    - API service
+    - PostgreSQL database connection
+    - pgvector extension
+    - Bedrock embedding model
+
+    Returns:
+        Dict[str, str]: Health status of each component with values:
+            - "ok": Component is functioning correctly.
+            - "failed": Component check failed.
+            - "unknown": Component not yet evaluated.
     """
 
     status = {

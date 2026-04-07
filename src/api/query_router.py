@@ -18,15 +18,23 @@ rag_pipeline = RAGPipeline()
 @router.post("/query")
 async def query_rag(request: Request):
     """
-    RAG query endpoint.
+    Handles RAG-based question answering requests.
 
-    Accepts:
-    - question
-    - optional filters
+    Accepts flexible input formats (JSON or form data), validates the request,
+    enforces document selection, and returns an answer with citations.
+
+    Args:
+        request (Request): Incoming HTTP request containing query payload.
 
     Returns:
-    - generated answer
-    - citations
+        Dict[str, Any]:
+            - answer (str): Generated answer.
+            - citations (List[Dict]): Supporting document chunks.
+
+    Raises:
+        HTTPException:
+            - 422: If request validation fails.
+            - 500: If RAG pipeline execution fails.
     """
 
     payload = {}
@@ -69,6 +77,7 @@ async def query_rag(request: Request):
         "query_received",
         has_filters=bool(qreq.filters),
     )
+
     # Require document selection
     if not qreq.filters or "title" not in qreq.filters:
         return {
