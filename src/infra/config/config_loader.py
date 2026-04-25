@@ -10,7 +10,7 @@ def load_config(config_path: Optional[str] = None) -> dict:
         p = Path(config_path)
     else:
         # repo_root/ config/config.yaml  (utils/ -> repo_root)
-        p = Path(__file__).resolve().parents[1] / "config" / "config.yaml"
+        p = Path(__file__).resolve().parents[3] / "config" / "config.yaml"
 
     if not p.exists():
         raise FileNotFoundError(f"Config file not found: {p}")

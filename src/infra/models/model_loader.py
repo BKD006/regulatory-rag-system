@@ -1,7 +1,7 @@
 import os
 import sys
 from dotenv import load_dotenv
-from utils.config_loader import load_config
+from src.infra.config.config_loader import load_config
 from logger.custom_logger import CustomLogger
 from exception.custom_exception import RegulatoryRAGException
 from langchain_groq import ChatGroq

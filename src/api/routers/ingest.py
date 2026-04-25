@@ -2,8 +2,8 @@ from fastapi import APIRouter, UploadFile, File, HTTPException, status
 import os
 import shutil
 
-from src.ingestion.ingest_llamaparse import DocumentIngestionPipeline
-from utils.models import IngestionConfig
+from src.core.ingestion.ingest_llamaparse import DocumentIngestionPipeline
+from src.shared.schemas import IngestionConfig
 from logger import GLOBAL_LOGGER as log
 from exception.custom_exception import RegulatoryRAGException
 

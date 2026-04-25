@@ -1,6 +1,6 @@
 from fastapi import APIRouter, HTTPException
 
-from utils.db_utils import (
+from src.infra.db.db_utils import (
     list_documents,
     list_document_titles,
     delete_document_by_title,

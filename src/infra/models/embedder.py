@@ -2,8 +2,8 @@ import asyncio
 from typing import List, Optional, Callable
 from datetime import datetime
 
-from utils.models import DocumentChunk
-from utils.model_loader import ModelLoader
+from src.shared.schemas import DocumentChunk
+from src.infra.models.model_loader import ModelLoader
 from logger import GLOBAL_LOGGER as log
 from exception.custom_exception import RegulatoryRAGException
 

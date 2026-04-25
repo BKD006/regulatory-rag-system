@@ -1,5 +1,5 @@
 from typing import List, Optional
-from utils.models import RetrievedChunk
+from src.shared.schemas import RetrievedChunk
 from exception.custom_exception import RegulatoryRAGException
 from logger import GLOBAL_LOGGER as log
 

@@ -1,5 +1,5 @@
 from fastapi import APIRouter
-from utils import db_utils
+from src.infra.db import db_utils
 import boto3
 import os
 

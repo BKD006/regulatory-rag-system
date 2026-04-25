@@ -1,6 +1,6 @@
 from fastapi import APIRouter, HTTPException
 
-from utils.db_utils import get_chunk_by_id
+from src.infra.db.db_utils import get_chunk_by_id
 from logger import GLOBAL_LOGGER as log
 
 router = APIRouter(

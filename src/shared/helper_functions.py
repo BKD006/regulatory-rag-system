@@ -1,5 +1,5 @@
 from typing import List
-from utils.models import RetrievedChunk, Citation
+from src.shared.schemas import RetrievedChunk, Citation
 
 
 def format_citations(chunks: List[RetrievedChunk]) -> List[Citation]:
